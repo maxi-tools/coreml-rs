@@ -311,9 +311,12 @@ impl CoreMLBatchModel {
                 "f32" => {
                     self.outputs.insert(name, ("f32", shape.to_vec()));
                 }
+                "f16" => {
+                    self.outputs.insert(name, ("f16", shape.to_vec()));
+                }
                 _ => {
                     return Err(CoreMLError::UnknownErrorStatic(
-                        "non-f32 output types are not supported (yet)!",
+                        "unsupported output type (only f32 and f16 are supported)",
                     ))
                 }
             }

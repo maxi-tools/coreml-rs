@@ -11,6 +11,7 @@ pub mod swift {
         Cpu,
         CpuAndANE,
         CpuAndGpu,
+        All,
     }
     extern "Rust" {
         fn rust_vec_from_ptr_i32(ptr: *mut i32, len: usize) -> Vec<i32>;
@@ -85,6 +86,14 @@ pub mod swift {
             len: usize,
         ) -> bool;
         #[must_use()]
+        fn bindOutputU16(
+            &self,
+            shape: Vec<i32>,
+            featureName: String,
+            data: *mut u16,
+            len: usize,
+        ) -> bool;
+        #[must_use()]
         fn bindInputF32(
             &self,
             shape: Vec<usize>,
@@ -136,6 +145,7 @@ pub mod swift {
 
         fn outputDescription(&self) -> Vec<String>;
         fn outputF32(&self, name: String) -> Vec<f32>;
+        fn outputF16AsF32(&self, name: String) -> Vec<f32>;
         fn outputU16(&self, name: String) -> Vec<u16>;
         fn outputI32(&self, name: String) -> Vec<i32>;
         fn getError(&self) -> Option<String>;

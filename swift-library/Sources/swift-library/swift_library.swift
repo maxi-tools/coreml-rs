@@ -178,6 +178,9 @@ class ModelDescription {
 			if res.multiArrayConstraint!.dataType == MLMultiArrayDataType.float32 {
 				return "f32".intoRustString()
 			}
+			if res.multiArrayConstraint!.dataType == MLMultiArrayDataType.float16 {
+				return "f16".intoRustString()
+			}
 		}
 		return "".intoRustString()
 	}
@@ -290,10 +293,47 @@ class ModelOutput {
 		}
 		return v
 	}
+	// Convert f16 output to f32 on Swift side for better compatibility
+	func outputF16AsF32(name: RustString) -> RustVec<Float32> {
+		if hasFailedToLoad() { return RustVec.init() }
+		let output = self.output!
+		let out: MLMultiArray
+		if let featureValue = output[name.toString()] as? MLFeatureValue {
+			out = featureValue.multiArrayValue!
+		} else {
+			out = (output[name.toString()]! as? MLMultiArray)!
+		}
+		let l = out.count
+		var v = RustVec<Float32>()
+		// Read raw f16 data and convert to f32
+		out.withUnsafeMutableBytes { ptr, strides in
+			if out.dataType == .float16 {
+				let p = ptr.baseAddress!.assumingMemoryBound(to: Float16.self)
+				for i in 0..<l {
+					v.push(value: Float32(p[i]))
+				}
+			} else if out.dataType == .float32 {
+				let p = ptr.baseAddress!.assumingMemoryBound(to: Float32.self)
+				for i in 0..<l {
+					v.push(value: p[i])
+				}
+			} else {
+				print("Unexpected dataType: \(out.dataType)")
+			}
+		}
+		return v
+	}
+
 	func outputU16(name: RustString) -> RustVec<UInt16> {
 		if hasFailedToLoad() { return RustVec.init() }
 		let output = self.output!
-		let out = (output[name.toString()]! as? MLMultiArray)!
+		// Try MLFeatureValue first (for non-backed outputs), then MLMultiArray
+		let out: MLMultiArray
+		if let featureValue = output[name.toString()] as? MLFeatureValue {
+			out = featureValue.multiArrayValue!
+		} else {
+			out = (output[name.toString()]! as? MLMultiArray)!
+		}
 		let l = out.count
 		var v = RustVec<UInt16>()
 		out.withUnsafeMutableBytes { ptr, strides in
@@ -321,6 +361,9 @@ func initWithCompiledAsset(
 		break
 	case .CpuAndGpu:
 		computeUnits = .cpuAndGPU
+		break
+	case .All:
+		computeUnits = .all
 		break
 	}
 	let data = Data.init(
@@ -353,6 +396,9 @@ func initWithCompiledAssetBatch(
 	case .CpuAndGpu:
 		computeUnits = .cpuAndGPU
 		break
+	case .All:
+		computeUnits = .all
+		break
 	}
 	let data = Data.init(
 		bytesNoCopy: ptr, count: len,
@@ -381,6 +427,9 @@ func initWithPath(path: RustString, compute: ComputePlatform, compiled: Bool) ->
 		break
 	case .CpuAndGpu:
 		computeUnits = .cpuAndGPU
+		break
+	case .All:
+		computeUnits = .all
 		break
 	}
 	var compiledPath: URL
@@ -427,6 +476,9 @@ func initWithPathBatch(path: RustString, compute: ComputePlatform, compiled: Boo
 		break
 	case .CpuAndGpu:
 		computeUnits = .cpuAndGPU
+		break
+	case .All:
+		computeUnits = .all
 		break
 	}
 	var compiledPath: URL
@@ -545,6 +597,37 @@ class Model: @unchecked Sendable {
 		}
 	}
 
+	func bindOutputU16(
+		shape: RustVec<Int32>, featureName: RustString, data: UnsafeMutablePointer<UInt16>,
+		len: UInt
+	) -> Bool {
+		if hasFailedToLoad() { return false }
+		do {
+			var arr: [NSNumber] = []
+			var stride: [NSNumber] = []
+			var m: Int32 = 1
+			for i in shape.reversed() {
+				stride.append(NSNumber(value: m))
+				m = i * m
+			}
+			stride.reverse()
+			for s in shape {
+				arr.append(NSNumber(value: s))
+			}
+			let deallocMultiArrayRust = { (_ ptr: UnsafeMutableRawPointer) in
+				()
+			}
+			let array = try MLMultiArray.init(
+				dataPointer: data, shape: arr, dataType: MLMultiArrayDataType.float16,
+				strides: stride, deallocator: deallocMultiArrayRust)
+			self.outputs[featureName.toString()] = array
+			return true
+		} catch {
+			print("Unexpected output error: \(error)")
+			return false
+		}
+	}
+
 	func predict() -> ModelOutput {
 		if hasFailedToLoad() {
 			return ModelOutput(
@@ -554,11 +637,18 @@ class Model: @unchecked Sendable {
 			let input = try MLDictionaryFeatureProvider.init(dictionary: self.dict)
 			let opts = MLPredictionOptions.init()
 			opts.outputBackings = self.outputs
-			try self.model!.prediction(from: input, options: opts)
-			let outputs = self.outputs
+			let result = try self.model!.prediction(from: input, options: opts)
+			// Merge bound outputs with prediction results (for non-bound outputs like f16)
+			var outputs: [String: Any] = self.outputs
+			for name in result.featureNames {
+				if outputs[name] == nil {
+					// Not in outputBackings, get from prediction result
+					outputs[name] = result.featureValue(for: name)
+				}
+			}
 			self.outputs = [:]
 			self.dict = [:]
-			return ModelOutput(output: outputs, error: nil)
+			return ModelOutput(output: outputs, error: nil, cpy: true)
 		} catch {
 			// print("Unexpected predict error: \(error)")
 			return ModelOutput(output: nil, error: error)

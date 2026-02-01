@@ -56,6 +56,7 @@ impl std::fmt::Debug for CoreMLModelOptions {
                     ComputePlatform::Cpu => &"CPU",
                     ComputePlatform::CpuAndANE => &"CpuAndAne",
                     ComputePlatform::CpuAndGpu => &"CpuAndGpu",
+                    ComputePlatform::All => &"All",
                 },
             )
             .finish()
@@ -419,6 +420,27 @@ impl CoreMLModel {
         true
     }
 
+    pub fn add_output_u16(&mut self, tag: impl AsRef<str>, out: impl Into<MLArray>) -> bool {
+        let arr: MLArray = out.into();
+        let shape = arr.shape();
+        self.outputs
+            .insert(tag.as_ref().to_string(), ("f16", shape.to_vec()));
+        let shape: Vec<i32> = shape.into_iter().map(|i| *i as i32).collect();
+        let (mut data, offset) = arr.extract_to_tensor::<u16>().into_raw_vec_and_offset();
+        assert!(
+            matches!(offset, Some(0) | None),
+            "array base offset is not zero; bad aligned output buffer"
+        );
+        let name = tag.as_ref().to_string();
+        let ptr = data.as_mut_ptr();
+        let len = data.capacity();
+        if !self.model.bindOutputU16(shape, name, ptr, len) {
+            return false;
+        }
+        std::mem::forget(data);
+        true
+    }
+
     pub fn predict(&mut self) -> Result<MLModelOutput, CoreMLError> {
         let desc = self.model.description();
         for name in desc.output_names() {
@@ -428,9 +450,14 @@ impl CoreMLModel {
                 "f32" => {
                     self.add_output_f32(name, Array::<f32, _>::zeros(output_shape));
                 }
+                "f16" => {
+                    // Don't bind f16 outputs - let CoreML handle them
+                    // We'll read them directly from prediction result
+                    self.outputs.insert(name.to_string(), ("f16", output_shape.to_vec()));
+                }
                 _ => {
                     return Err(CoreMLError::UnknownErrorStatic(
-                        "non-f32 output types are not supported (yet)!",
+                        "unsupported output type (only f32 and f16 are supported)",
                     ))
                 }
             }
@@ -453,8 +480,9 @@ impl CoreMLModel {
                             Some((key, array.into()))
                         }
                         "f16" => {
-                            let out = output.outputU16(name);
-                            let array = reinterpret_u16_to_f16(Array::from_shape_vec(shape, out).ok()?);
+                            // Use outputF16AsF32 which converts f16→f32 in Swift
+                            let out = output.outputF16AsF32(name);
+                            let array = Array::from_shape_vec(shape, out).ok()?;
                             Some((key, array.into()))
                         }
                         _ => {
