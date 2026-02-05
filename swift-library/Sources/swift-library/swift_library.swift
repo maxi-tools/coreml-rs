@@ -178,6 +178,9 @@ class ModelDescription {
 			if res.multiArrayConstraint!.dataType == MLMultiArrayDataType.float32 {
 				return "f32".intoRustString()
 			}
+			if res.multiArrayConstraint!.dataType == MLMultiArrayDataType.float16 {
+				return "f16".intoRustString()
+			}
 		}
 		return "".intoRustString()
 	}
@@ -545,6 +548,37 @@ class Model: @unchecked Sendable {
 		}
 	}
 
+	func bindOutputU16(
+		shape: RustVec<Int32>, featureName: RustString, data: UnsafeMutablePointer<UInt16>,
+		len: UInt
+	) -> Bool {
+		if hasFailedToLoad() { return false }
+		do {
+			var arr: [NSNumber] = []
+			var stride: [NSNumber] = []
+			var m: Int32 = 1
+			for i in shape.reversed() {
+				stride.append(NSNumber(value: m))
+				m = i * m
+			}
+			stride.reverse()
+			for s in shape {
+				arr.append(NSNumber(value: s))
+			}
+			let deallocMultiArrayRust = { (_ ptr: UnsafeMutableRawPointer) in
+				()
+			}
+			let array = try MLMultiArray.init(
+				dataPointer: data, shape: arr, dataType: MLMultiArrayDataType.float16,
+				strides: stride, deallocator: deallocMultiArrayRust)
+			self.outputs[featureName.toString()] = array
+			return true
+		} catch {
+			print("Unexpected output error: \(error)")
+			return false
+		}
+	}
+
 	func predict() -> ModelOutput {
 		if hasFailedToLoad() {
 			return ModelOutput(
@@ -554,11 +588,23 @@ class Model: @unchecked Sendable {
 			let input = try MLDictionaryFeatureProvider.init(dictionary: self.dict)
 			let opts = MLPredictionOptions.init()
 			opts.outputBackings = self.outputs
-			try self.model!.prediction(from: input, options: opts)
-			let outputs = self.outputs
+			let result = try self.model!.prediction(from: input, options: opts)
+			
+			// If we have output backings, use them
+			let outputs: [String: Any]
+			if self.outputs.isEmpty {
+				// No output backing - extract from prediction result
+				let features = result as? MLDictionaryFeatureProvider
+				outputs = features?.dictionary ?? [:]
+			} else {
+				// Use output backing
+				outputs = self.outputs
+			}
+			
 			self.outputs = [:]
 			self.dict = [:]
-			return ModelOutput(output: outputs, error: nil)
+			// Use cpy=true to safely copy data from MLFeatureValue outputs
+			return ModelOutput(output: outputs, error: nil, cpy: true)
 		} catch {
 			// print("Unexpected predict error: \(error)")
 			return ModelOutput(output: nil, error: error)
@@ -615,7 +661,7 @@ class Model: @unchecked Sendable {
 				rust_vec_free_i32(ptr.assumingMemoryBound(to: Int32.self), len)
 			}
 			let array = try MLMultiArray.init(
-				dataPointer: data, shape: arr, dataType: MLMultiArrayDataType.float32,
+				dataPointer: data, shape: arr, dataType: MLMultiArrayDataType.int32,
 				strides: stride, deallocator: deallocMultiArrayRust)
 			let value = MLFeatureValue(multiArray: array)
 			self.dict[featureName.toString()] = value
@@ -653,6 +699,57 @@ class Model: @unchecked Sendable {
 			return true
 		} catch {
 			print("Unexpected error; \(error)")
+			return false
+		}
+	}
+
+	func bindInputCVPixelBuffer(
+		width: UInt, height: UInt, featureName: RustString, data: UnsafeMutablePointer<UInt8>,
+		len: UInt
+	) -> Bool {
+		do {
+			// Create CVPixelBuffer from raw BGRA data
+			var pixelBuffer: CVPixelBuffer? = nil
+			let bytesPerRow = width * 4  // 4 bytes per pixel (BGRA)
+			
+			// Create a context to hold the length
+			let contextPtr = UnsafeMutablePointer<UInt>.allocate(capacity: 1)
+			contextPtr.pointee = len
+			
+			// Create pixel buffer with the provided data
+			let status = CVPixelBufferCreateWithBytes(
+				nil,
+				Int(width),
+				Int(height),
+				kCVPixelFormatType_32BGRA,
+				data,
+				Int(bytesPerRow),
+				{ releaseContext, baseAddress in
+					// Deallocator callback - free the Rust vec when CVPixelBuffer is done
+					if let baseAddress = baseAddress, let releaseContext = releaseContext {
+						let mutablePtr = UnsafeMutablePointer<UInt8>(mutating: baseAddress.assumingMemoryBound(to: UInt8.self))
+						let len = releaseContext.assumingMemoryBound(to: UInt.self).pointee
+						rust_vec_free_u8(mutablePtr, len)
+						// Free the context pointer
+						releaseContext.assumingMemoryBound(to: UInt.self).deallocate()
+					}
+				},
+				contextPtr,
+				nil,
+				&pixelBuffer
+			)
+			
+			guard status == kCVReturnSuccess, let pixelBuffer = pixelBuffer else {
+				print("Failed to create CVPixelBuffer: \(status)")
+				contextPtr.deallocate()
+				return false
+			}
+			
+			let value = MLFeatureValue(pixelBuffer: pixelBuffer)
+			self.dict[featureName.toString()] = value
+			return true
+		} catch {
+			print("Unexpected CVPixelBuffer error: \(error)")
 			return false
 		}
 	}
