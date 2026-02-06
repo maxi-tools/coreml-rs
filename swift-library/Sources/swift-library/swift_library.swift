@@ -256,31 +256,39 @@ class ModelOutput {
 	func outputF32(name: RustString) -> RustVec<Float32> {
 		if hasFailedToLoad() { return RustVec.init() }
 		let output = self.output!
-		if self.cpy {
-			let out = (output[name.toString()]! as? MLFeatureValue)!.multiArrayValue!
-			let l = out.count
-			var v = RustVec<Float32>()
-			out.withUnsafeMutableBytes { ptr, strides in
-				let p = ptr.baseAddress!.assumingMemoryBound(to: Float32.self)
-				v = rust_vec_from_ptr_f32_cpy(p, UInt(l))
-			}
-			return v
+		let value = output[name.toString()]!
+		
+		let out: MLMultiArray
+		if let feature = value as? MLFeatureValue {
+			out = feature.multiArrayValue!
 		} else {
-			let out = (output[name.toString()]! as? MLMultiArray)!
-			let l = out.count
-			var v = RustVec<Float32>()
-			out.withUnsafeMutableBytes { ptr, strides in
-				let p = ptr.baseAddress!.assumingMemoryBound(to: Float32.self)
+			out = value as! MLMultiArray
+		}
+		
+		let l = out.count
+		var v = RustVec<Float32>()
+		out.withUnsafeMutableBytes { ptr, strides in
+			let p = ptr.baseAddress!.assumingMemoryBound(to: Float32.self)
+			if self.cpy {
+				v = rust_vec_from_ptr_f32_cpy(p, UInt(l))
+			} else {
 				v = rust_vec_from_ptr_f32(p, UInt(l))
 			}
-			return v
 		}
-
+		return v
 	}
 	func outputI32(name: RustString) -> RustVec<Int32> {
 		if hasFailedToLoad() { return RustVec.init() }
 		let output = self.output!
-		let out = (output[name.toString()]! as? MLMultiArray)!
+		let value = output[name.toString()]!
+		
+		let out: MLMultiArray
+		if let feature = value as? MLFeatureValue {
+			out = feature.multiArrayValue!
+		} else {
+			out = value as! MLMultiArray
+		}
+		
 		let l = out.count
 		var v = RustVec<Int32>()
 		out.withUnsafeMutableBytes { ptr, strides in
@@ -296,7 +304,15 @@ class ModelOutput {
 	func outputU16(name: RustString) -> RustVec<UInt16> {
 		if hasFailedToLoad() { return RustVec.init() }
 		let output = self.output!
-		let out = (output[name.toString()]! as? MLMultiArray)!
+		let value = output[name.toString()]!
+		
+		let out: MLMultiArray
+		if let feature = value as? MLFeatureValue {
+			out = feature.multiArrayValue!
+		} else {
+			out = value as! MLMultiArray
+		}
+		
 		let l = out.count
 		var v = RustVec<UInt16>()
 		out.withUnsafeMutableBytes { ptr, strides in
