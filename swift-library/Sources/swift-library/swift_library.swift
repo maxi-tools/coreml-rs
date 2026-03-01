@@ -225,6 +225,51 @@ class ModelDescription {
 	}
 }
 
+// Check if MLMultiArray strides match contiguous (C-order) layout
+func isContiguous(shape: [Int], strides: [Int]) -> Bool {
+	guard shape.count == strides.count else { return false }
+	var expected = 1
+	for i in (0..<shape.count).reversed() {
+		if strides[i] != expected { return false }
+		expected *= shape[i]
+	}
+	return true
+}
+
+// Copy from strided source to contiguous destination buffer
+// Generic over element type (Float32, UInt16, Int32)
+func copyDestrided<T>(src: UnsafePointer<T>, dst: UnsafeMutablePointer<T>, shape: [Int], strides: [Int], name: String = "") {
+	if !name.isEmpty {
+		// Compute expected contiguous strides for diagnostics
+		var expected: [Int] = Array(repeating: 1, count: shape.count)
+		for i in (0..<shape.count - 1).reversed() {
+			expected[i] = expected[i + 1] * shape[i + 1]
+		}
+		let count = shape.reduce(1, *)
+		print("[coreml-rs] de-striding \(name): shape=\(shape) strides=\(strides) expected=\(expected) count=\(count)")
+	}
+	let ndim = shape.count
+	if ndim == 0 { return }
+	
+	// Recursive copy respecting strides
+	func copyRecursive(srcOffset: Int, dstOffset: inout Int, dim: Int) {
+		if dim == ndim - 1 {
+			// Innermost dimension — contiguous copy (stride[last] is always 1 for CoreML)
+			for i in 0..<shape[dim] {
+				dst[dstOffset] = src[srcOffset + i * strides[dim]]
+				dstOffset += 1
+			}
+		} else {
+			for i in 0..<shape[dim] {
+				copyRecursive(srcOffset: srcOffset + i * strides[dim], dstOffset: &dstOffset, dim: dim + 1)
+			}
+		}
+	}
+	
+	var dstOff = 0
+	copyRecursive(srcOffset: 0, dstOffset: &dstOff, dim: 0)
+}
+
 class ModelOutput {
 	var output: [String: Any]? = [:]
 	var error: (any Error)? = nil
@@ -253,74 +298,97 @@ class ModelOutput {
 		}
 		return ret
 	}
-	func outputF32(name: RustString) -> RustVec<Float32> {
+		func outputF32(name: RustString) -> RustVec<Float32> {
 		if hasFailedToLoad() { return RustVec.init() }
 		let output = self.output!
 		let value = output[name.toString()]!
-		
+
 		let out: MLMultiArray
 		if let feature = value as? MLFeatureValue {
 			out = feature.multiArrayValue!
 		} else {
 			out = value as! MLMultiArray
 		}
-		
+
 		let l = out.count
+		let shape = out.shape.map { $0.intValue }
 		var v = RustVec<Float32>()
 		out.withUnsafeMutableBytes { ptr, strides in
 			let p = ptr.baseAddress!.assumingMemoryBound(to: Float32.self)
-			if self.cpy {
-				v = rust_vec_from_ptr_f32_cpy(p, UInt(l))
+			// Check if strides match contiguous layout
+			if isContiguous(shape: shape, strides: strides) {
+				if self.cpy {
+					v = rust_vec_from_ptr_f32_cpy(p, UInt(l))
+				} else {
+					v = rust_vec_from_ptr_f32(p, UInt(l))
+				}
 			} else {
-				v = rust_vec_from_ptr_f32(p, UInt(l))
+				// Non-contiguous (padded) strides — copy with de-striding
+				let buf = UnsafeMutablePointer<Float32>.allocate(capacity: l)
+				copyDestrided(src: p, dst: buf, shape: shape, strides: strides, name: "outputF32 \(name)")
+				v = rust_vec_from_ptr_f32(buf, UInt(l))
 			}
 		}
 		return v
 	}
-	func outputI32(name: RustString) -> RustVec<Int32> {
+		func outputI32(name: RustString) -> RustVec<Int32> {
 		if hasFailedToLoad() { return RustVec.init() }
 		let output = self.output!
 		let value = output[name.toString()]!
-		
+
 		let out: MLMultiArray
 		if let feature = value as? MLFeatureValue {
 			out = feature.multiArrayValue!
 		} else {
 			out = value as! MLMultiArray
 		}
-		
+
 		let l = out.count
+		let shape = out.shape.map { $0.intValue }
 		var v = RustVec<Int32>()
 		out.withUnsafeMutableBytes { ptr, strides in
 			let p = ptr.baseAddress!.assumingMemoryBound(to: Int32.self)
-			if self.cpy {
-				v = rust_vec_from_ptr_i32_cpy(p, UInt(l))
+			if isContiguous(shape: shape, strides: strides) {
+				if self.cpy {
+					v = rust_vec_from_ptr_i32_cpy(p, UInt(l))
+				} else {
+					v = rust_vec_from_ptr_i32(p, UInt(l))
+				}
 			} else {
-				v = rust_vec_from_ptr_i32(p, UInt(l))
+				let buf = UnsafeMutablePointer<Int32>.allocate(capacity: l)
+				copyDestrided(src: p, dst: buf, shape: shape, strides: strides, name: "outputI32 \(name)")
+				v = rust_vec_from_ptr_i32(buf, UInt(l))
 			}
 		}
 		return v
 	}
-	func outputU16(name: RustString) -> RustVec<UInt16> {
+		func outputU16(name: RustString) -> RustVec<UInt16> {
 		if hasFailedToLoad() { return RustVec.init() }
 		let output = self.output!
 		let value = output[name.toString()]!
-		
+
 		let out: MLMultiArray
 		if let feature = value as? MLFeatureValue {
 			out = feature.multiArrayValue!
 		} else {
 			out = value as! MLMultiArray
 		}
-		
+
 		let l = out.count
+		let shape = out.shape.map { $0.intValue }
 		var v = RustVec<UInt16>()
 		out.withUnsafeMutableBytes { ptr, strides in
 			let p = ptr.baseAddress!.assumingMemoryBound(to: UInt16.self)
-			if self.cpy {
-				v = rust_vec_from_ptr_u16_cpy(p, UInt(l))
+			if isContiguous(shape: shape, strides: strides) {
+				if self.cpy {
+					v = rust_vec_from_ptr_u16_cpy(p, UInt(l))
+				} else {
+					v = rust_vec_from_ptr_u16(p, UInt(l))
+				}
 			} else {
-				v = rust_vec_from_ptr_u16(p, UInt(l))
+				let buf = UnsafeMutablePointer<UInt16>.allocate(capacity: l)
+				copyDestrided(src: p, dst: buf, shape: shape, strides: strides, name: "outputU16 \(name)")
+				v = rust_vec_from_ptr_u16(buf, UInt(l))
 			}
 		}
 		return v
