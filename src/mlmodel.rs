@@ -386,7 +386,7 @@ impl CoreMLModel {
         let desc = self.model.description();
         let shape: Vec<usize> = input.shape().to_vec();
         let arr = desc.input_shape(name.clone());
-        if arr.is_empty() {
+        if arr.is_empty() && !shape.is_empty() {
             return Err(CoreMLError::BadInputShape(format!(
                 "Input feature name '{name}' not expected!"
             )));
