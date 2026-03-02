@@ -5,3 +5,13 @@
 model_cache
 
 .DS_Store
+
+# AI agent configs
+.claude/
+.codex/
+.augment/
+.copilot/
+.gemini/
+.kiro/
+.opencode/
+.maxi/
