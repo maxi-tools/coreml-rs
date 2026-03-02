@@ -117,20 +117,44 @@ impl<T: MLType> From<ArrayBase<OwnedRepr<T>, Dim<IxDynImpl>>> for MLArray {
 }
 
 impl MLArray {
+    fn type_id(&self) -> usize {
+        match self {
+            MLArray::Float32Array(_) => 0,
+            MLArray::Float16Array(_) => 1,
+            MLArray::Int32Array(_) => 2,
+            MLArray::Int16Array(_) => 5,
+            MLArray::Int8Array(_) => 6,
+            MLArray::UInt32Array(_) => 7,
+            MLArray::UInt16Array(_) => 3,
+            MLArray::UInt8Array(_) => 4,
+        }
+    }
+
     pub fn extract_to_tensor<T: MLType>(self) -> Array<T, Dim<IxDynImpl>> {
+        self.try_extract_to_tensor()
+            .unwrap_or_else(|e| panic!("{}", e))
+    }
+
+    pub fn try_extract_to_tensor<T: MLType>(self) -> Result<Array<T, Dim<IxDynImpl>>, String> {
+        let actual = self.type_id();
+        let expected = T::TY;
+        if actual != expected {
+            return Err(format!(
+                "MLArray type mismatch: array holds type_id={} but extract requested type_id={}",
+                actual, expected
+            ));
+        }
         unsafe {
-            match self {
-                MLArray::Float32Array(fm) => std::mem::transmute(fm),
-                MLArray::Float16Array(fm) => std::mem::transmute(fm),
-
-                MLArray::Int32Array(im) => std::mem::transmute(im),
-                MLArray::Int16Array(im) => std::mem::transmute(im),
-                MLArray::Int8Array(im) => std::mem::transmute(im),
-
-                MLArray::UInt32Array(um) => std::mem::transmute(um),
-                MLArray::UInt16Array(um) => std::mem::transmute(um),
-                MLArray::UInt8Array(um) => std::mem::transmute(um),
-            }
+            Ok(match self {
+                MLArray::Float32Array(a) => std::mem::transmute(a),
+                MLArray::Float16Array(a) => std::mem::transmute(a),
+                MLArray::Int32Array(a) => std::mem::transmute(a),
+                MLArray::Int16Array(a) => std::mem::transmute(a),
+                MLArray::Int8Array(a) => std::mem::transmute(a),
+                MLArray::UInt32Array(a) => std::mem::transmute(a),
+                MLArray::UInt16Array(a) => std::mem::transmute(a),
+                MLArray::UInt8Array(a) => std::mem::transmute(a),
+            })
         }
     }
 }
