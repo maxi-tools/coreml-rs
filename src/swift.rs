@@ -34,13 +34,13 @@ pub mod swift {
         pub fn modelWithAssetsBatch(
             ptr: *mut u8,
             len: isize,
-            compute: ComputePlatform
+            compute: ComputePlatform,
         ) -> BatchModel;
         #[swift_bridge(swift_name = "initWithPathBatch")]
         pub fn modelWithPathBatch(
             path: String,
             compute: ComputePlatform,
-            compiled: bool
+            compiled: bool,
         ) -> BatchModel;
     }
 
@@ -66,7 +66,7 @@ pub mod swift {
             featureName: String,
             data: *mut f32,
             len: usize,
-            idx: isize
+            idx: isize,
         ) -> bool;
         #[swift_bridge(swift_name = "hasFailedToLoad")]
         fn failed(&self) -> bool;
@@ -81,7 +81,7 @@ pub mod swift {
             shape: Vec<i32>,
             featureName: String,
             data: *mut f32,
-            len: usize
+            len: usize,
         ) -> bool;
         #[must_use()]
         fn bindOutputU16(
@@ -89,7 +89,15 @@ pub mod swift {
             shape: Vec<i32>,
             featureName: String,
             data: *mut u16,
-            len: usize
+            len: usize,
+        ) -> bool;
+        #[must_use()]
+        fn bindOutputI32(
+            &self,
+            shape: Vec<i32>,
+            featureName: String,
+            data: *mut i32,
+            len: usize,
         ) -> bool;
         #[must_use()]
         fn bindInputF32(
@@ -97,7 +105,7 @@ pub mod swift {
             shape: Vec<usize>,
             featureName: String,
             data: *mut f32,
-            len: usize
+            len: usize,
         ) -> bool;
         #[must_use()]
         fn bindInputI32(
@@ -105,7 +113,7 @@ pub mod swift {
             shape: Vec<usize>,
             featureName: String,
             data: *mut i32,
-            len: usize
+            len: usize,
         ) -> bool;
         #[must_use()]
         fn bindInputU16(
@@ -113,7 +121,7 @@ pub mod swift {
             shape: Vec<usize>,
             featureName: String,
             data: *mut u16,
-            len: usize
+            len: usize,
         ) -> bool;
         #[must_use()]
         fn bindInputCVPixelBuffer(
@@ -122,7 +130,7 @@ pub mod swift {
             height: usize,
             featureName: String,
             data: *mut u8,
-            len: usize
+            len: usize,
         ) -> bool;
 
         #[swift_bridge(swift_name = "getCompiledPath")]
@@ -134,6 +142,12 @@ pub mod swift {
         fn predict(&self) -> ModelOutput;
         #[swift_bridge(swift_name = "hasFailedToLoad")]
         fn failed(&self) -> bool;
+
+        // CoreML State (MLState) for stateful KV cache
+        fn makeState(&mut self) -> bool;
+        fn predictWithState(&self) -> ModelOutput;
+        fn hasState(&self) -> bool;
+        fn resetState(&mut self);
     }
 
     extern "Swift" {
@@ -151,6 +165,7 @@ pub mod swift {
         type ModelOutput;
 
         fn outputDescription(&self) -> Vec<String>;
+        fn outputShape(&self, name: String) -> Vec<usize>;
         fn outputF32(&self, name: String) -> Vec<f32>;
         fn outputU16(&self, name: String) -> Vec<u16>;
         fn outputI32(&self, name: String) -> Vec<i32>;

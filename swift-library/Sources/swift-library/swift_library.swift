@@ -62,8 +62,6 @@ class BatchModel: @unchecked Sendable {
 		if hasFailedToLoad() { return false }
 		let config = MLModelConfiguration.init()
 		config.computeUnits = self.computeUnits
-		// IMPORTANT: disable experimentalMLE5EngineUsage, seems to cause crash on newer MacOS versions
-		config.setValue(1, forKey: "experimentalMLE5EngineUsage")
 		do {
 			if self.compiledPath == nil {
 				let semaphore = DispatchSemaphore(value: 0)
@@ -191,7 +189,16 @@ class ModelDescription {
 			let arr = res.multiArrayConstraint
 			guard let arr else { return RustVec.init() }
 			let ret = RustVec<UInt>()
-			for r in arr.shape {
+			// Check for flexible dimensions via shapeConstraint range (same as input_shape)
+			let ranges = arr.shapeConstraint.sizeRangeForDimension
+			for (i, r) in arr.shape.enumerated() {
+				if i < ranges.count {
+					let nsRange = ranges[i].rangeValue
+					if nsRange.length > 0 {
+						ret.push(value: 0)
+						continue
+					}
+				}
 				ret.push(value: UInt(truncating: r))
 			}
 			return ret
@@ -205,7 +212,17 @@ class ModelDescription {
 			let arr = res.multiArrayConstraint
 			guard let arr else { return RustVec.init() }
 			let ret = RustVec<UInt>()
-			for r in arr.shape {
+			// Check for flexible dimensions via shapeConstraint range
+			let ranges = arr.shapeConstraint.sizeRangeForDimension
+			for (i, r) in arr.shape.enumerated() {
+				if i < ranges.count {
+					let nsRange = ranges[i].rangeValue  // NSRange: location=min, length=max-min
+					if nsRange.length > 0 {
+						// Flexible dim — return 0 as wildcard
+						ret.push(value: 0)
+						continue
+					}
+				}
 				ret.push(value: UInt(truncating: r))
 			}
 			return ret
@@ -236,11 +253,9 @@ func isContiguous(shape: [Int], strides: [Int]) -> Bool {
 	return true
 }
 
-// Copy from strided source to contiguous destination buffer
-// Generic over element type (Float32, UInt16, Int32)
+// Copy from strided source to contiguous destination buffer (pointer arithmetic, no NSNumber)
 func copyDestrided<T>(src: UnsafePointer<T>, dst: UnsafeMutablePointer<T>, shape: [Int], strides: [Int], name: String = "") {
 	if !name.isEmpty {
-		// Compute expected contiguous strides for diagnostics
 		var expected: [Int] = Array(repeating: 1, count: shape.count)
 		for i in (0..<shape.count - 1).reversed() {
 			expected[i] = expected[i + 1] * shape[i + 1]
@@ -250,11 +265,8 @@ func copyDestrided<T>(src: UnsafePointer<T>, dst: UnsafeMutablePointer<T>, shape
 	}
 	let ndim = shape.count
 	if ndim == 0 { return }
-	
-	// Recursive copy respecting strides
 	func copyRecursive(srcOffset: Int, dstOffset: inout Int, dim: Int) {
 		if dim == ndim - 1 {
-			// Innermost dimension — contiguous copy (stride[last] is always 1 for CoreML)
 			for i in 0..<shape[dim] {
 				dst[dstOffset] = src[srcOffset + i * strides[dim]]
 				dstOffset += 1
@@ -265,7 +277,6 @@ func copyDestrided<T>(src: UnsafePointer<T>, dst: UnsafeMutablePointer<T>, shape
 			}
 		}
 	}
-	
 	var dstOff = 0
 	copyRecursive(srcOffset: 0, dstOffset: &dstOff, dim: 0)
 }
@@ -290,32 +301,55 @@ class ModelOutput {
 	}
 	func outputDescription() -> RustVec<RustString> {
 		if hasFailedToLoad() { return RustVec.init() }
-		let output = self.output!
+		guard let output = self.output else { return RustVec.init() }
 		let ret = RustVec<RustString>()
 		for key in output.keys {
-			let str = "\(key):\(output[key]!)".intoRustString()
+			guard let val = output[key] else { continue }
+			let str = "\(key):\(val)".intoRustString()
 			ret.push(value: str)
 		}
 		return ret
 	}
-		func outputF32(name: RustString) -> RustVec<Float32> {
+	func outputShape(name: RustString) -> RustVec<UInt> {
 		if hasFailedToLoad() { return RustVec.init() }
-		let output = self.output!
-		let value = output[name.toString()]!
-
+		guard let output = self.output, let value = output[name.toString()] else { return RustVec.init() }
 		let out: MLMultiArray
 		if let feature = value as? MLFeatureValue {
-			out = feature.multiArrayValue!
+			guard let arr = feature.multiArrayValue else { return RustVec.init() }
+			out = arr
+		} else if let arr = value as? MLMultiArray {
+			out = arr
 		} else {
-			out = value as! MLMultiArray
+			return RustVec.init()
 		}
+		let ret = RustVec<UInt>()
+		for dim in out.shape {
+			ret.push(value: UInt(truncating: dim))
+		}
+		return ret
+	}
+		func outputF32(name: RustString) -> RustVec<Float32> {
+if hasFailedToLoad() { return RustVec.init() }
+guard let output = self.output else { return RustVec.init() }
+guard let value = output[name.toString()] else { return RustVec.init() }
+
+let out: MLMultiArray
+if let feature = value as? MLFeatureValue {
+guard let arr = feature.multiArrayValue else { return RustVec.init() }
+out = arr
+} else if let arr = value as? MLMultiArray {
+out = arr
+} else {
+return RustVec.init()
+}
 
 		let l = out.count
+		if l == 0 { return RustVec<Float32>() }
 		let shape = out.shape.map { $0.intValue }
 		var v = RustVec<Float32>()
 		out.withUnsafeMutableBytes { ptr, strides in
-			let p = ptr.baseAddress!.assumingMemoryBound(to: Float32.self)
-			// Check if strides match contiguous layout
+			guard let base = ptr.baseAddress else { return }
+			let p = base.assumingMemoryBound(to: Float32.self)
 			if isContiguous(shape: shape, strides: strides) {
 				if self.cpy {
 					v = rust_vec_from_ptr_f32_cpy(p, UInt(l))
@@ -323,31 +357,36 @@ class ModelOutput {
 					v = rust_vec_from_ptr_f32(p, UInt(l))
 				}
 			} else {
-				// Non-contiguous (padded) strides — copy with de-striding
 				let buf = UnsafeMutablePointer<Float32>.allocate(capacity: l)
 				copyDestrided(src: p, dst: buf, shape: shape, strides: strides, name: "outputF32 \(name)")
-				v = rust_vec_from_ptr_f32(buf, UInt(l))
+				v = rust_vec_from_ptr_f32_cpy(buf, UInt(l))
+				buf.deallocate()
 			}
 		}
 		return v
 	}
 		func outputI32(name: RustString) -> RustVec<Int32> {
-		if hasFailedToLoad() { return RustVec.init() }
-		let output = self.output!
-		let value = output[name.toString()]!
+if hasFailedToLoad() { return RustVec.init() }
+guard let output = self.output else { return RustVec.init() }
+guard let value = output[name.toString()] else { return RustVec.init() }
 
-		let out: MLMultiArray
-		if let feature = value as? MLFeatureValue {
-			out = feature.multiArrayValue!
-		} else {
-			out = value as! MLMultiArray
-		}
+let out: MLMultiArray
+if let feature = value as? MLFeatureValue {
+guard let arr = feature.multiArrayValue else { return RustVec.init() }
+out = arr
+} else if let arr = value as? MLMultiArray {
+out = arr
+} else {
+return RustVec.init()
+}
 
 		let l = out.count
+		if l == 0 { return RustVec<Int32>() }
 		let shape = out.shape.map { $0.intValue }
 		var v = RustVec<Int32>()
 		out.withUnsafeMutableBytes { ptr, strides in
-			let p = ptr.baseAddress!.assumingMemoryBound(to: Int32.self)
+			guard let base = ptr.baseAddress else { return }
+			let p = base.assumingMemoryBound(to: Int32.self)
 			if isContiguous(shape: shape, strides: strides) {
 				if self.cpy {
 					v = rust_vec_from_ptr_i32_cpy(p, UInt(l))
@@ -357,28 +396,34 @@ class ModelOutput {
 			} else {
 				let buf = UnsafeMutablePointer<Int32>.allocate(capacity: l)
 				copyDestrided(src: p, dst: buf, shape: shape, strides: strides, name: "outputI32 \(name)")
-				v = rust_vec_from_ptr_i32(buf, UInt(l))
+				v = rust_vec_from_ptr_i32_cpy(buf, UInt(l))
+				buf.deallocate()
 			}
 		}
 		return v
 	}
 		func outputU16(name: RustString) -> RustVec<UInt16> {
 		if hasFailedToLoad() { return RustVec.init() }
-		let output = self.output!
-		let value = output[name.toString()]!
+		guard let output = self.output else { return RustVec.init() }
+		guard let value = output[name.toString()] else { return RustVec.init() }
 
 		let out: MLMultiArray
 		if let feature = value as? MLFeatureValue {
-			out = feature.multiArrayValue!
+			guard let arr = feature.multiArrayValue else { return RustVec.init() }
+			out = arr
+		} else if let arr = value as? MLMultiArray {
+			out = arr
 		} else {
-			out = value as! MLMultiArray
+			return RustVec.init()
 		}
 
 		let l = out.count
+		if l == 0 { return RustVec<UInt16>() }
 		let shape = out.shape.map { $0.intValue }
 		var v = RustVec<UInt16>()
 		out.withUnsafeMutableBytes { ptr, strides in
-			let p = ptr.baseAddress!.assumingMemoryBound(to: UInt16.self)
+			guard let base = ptr.baseAddress else { return }
+			let p = base.assumingMemoryBound(to: UInt16.self)
 			if isContiguous(shape: shape, strides: strides) {
 				if self.cpy {
 					v = rust_vec_from_ptr_u16_cpy(p, UInt(l))
@@ -388,7 +433,8 @@ class ModelOutput {
 			} else {
 				let buf = UnsafeMutablePointer<UInt16>.allocate(capacity: l)
 				copyDestrided(src: p, dst: buf, shape: shape, strides: strides, name: "outputU16 \(name)")
-				v = rust_vec_from_ptr_u16(buf, UInt(l))
+				v = rust_vec_from_ptr_u16_cpy(buf, UInt(l))
+				buf.deallocate()
 			}
 		}
 		return v
@@ -472,12 +518,13 @@ func initWithPath(path: RustString, compute: ComputePlatform, compiled: Bool) ->
 	}
 	var compiledPath: URL
 	if compiled {
-		compiledPath = URL(string: path.toString())!
+		compiledPath = URL(fileURLWithPath: path.toString())
 	} else {
-		let url = URL(string: path.toString())!
+		let url = URL(fileURLWithPath: path.toString())
 		do {
 			compiledPath = try MLModel.compileModel(at: url)
 		} catch {
+			print("[CoreML compile error] \(error)")
 			return Model.init(failedToLoad: true)
 		}
 	}
@@ -489,7 +536,7 @@ func initWithPath(path: RustString, compute: ComputePlatform, compiled: Bool) ->
 
 // Compile model and overwrite the file to the permanent location, replacing it if necessary
 func compileToPath(model: RustString, to: RustString, name: RustString) -> Bool {
-	let url = URL(string: model.toString())!
+	let url = URL(fileURLWithPath: model.toString())
 	do {
 		let compiledPath = try MLModel.compileModel(at: url)
 		let fileManager = FileManager.default
@@ -518,9 +565,9 @@ func initWithPathBatch(path: RustString, compute: ComputePlatform, compiled: Boo
 	}
 	var compiledPath: URL
 	if compiled {
-		compiledPath = URL(string: path.toString())!
+		compiledPath = URL(fileURLWithPath: path.toString())
 	} else {
-		let url = URL(string: path.toString())!
+		let url = URL(fileURLWithPath: path.toString())
 		do {
 			compiledPath = try MLModel.compileModel(at: url)
 		} catch {
@@ -552,6 +599,7 @@ class Model: @unchecked Sendable {
 	var dict: [String: Any] = [:]
 	var outputs: [String: Any] = [:]
 	var computeUnits: MLComputeUnits = .cpuAndNeuralEngine
+	var state: Any? = nil  // MLState (macOS 15+), stored as Any for backwards compat
 
 	var failedToLoad: Bool
 	init(failedToLoad: Bool) {
@@ -587,6 +635,7 @@ class Model: @unchecked Sendable {
 			}
 			return true
 		} catch {
+			print("[CoreML load error] \(error)")
 			return false
 		}
 	}
@@ -594,7 +643,59 @@ class Model: @unchecked Sendable {
 	func unload() -> Bool {
 		if hasFailedToLoad() { return false }
 		self.model = nil
+		self.state = nil
 		return true
+	}
+
+	// MARK: - CoreML State (MLState) for stateful KV cache
+
+	func makeState() -> Bool {
+		guard let model = self.model else { return false }
+		if #available(macOS 15.0, iOS 18.0, *) {
+			self.state = model.makeState()
+			return true
+		} else {
+			return false
+		}
+	}
+
+	func predictWithState() -> ModelOutput {
+		guard let model = self.model, let stateAny = self.state else {
+			return ModelOutput(output: nil, error: RuntimeError("Model or state not loaded"))
+		}
+		do {
+			let input = try MLDictionaryFeatureProvider.init(dictionary: self.dict)
+			let opts = MLPredictionOptions.init()
+			opts.outputBackings = self.outputs
+			if #available(macOS 15.0, iOS 18.0, *) {
+				guard let state = stateAny as? MLState else {
+					return ModelOutput(output: nil, error: RuntimeError("State is not MLState"))
+				}
+				let result = try model.prediction(from: input, using: state, options: opts)
+				let outputs: [String: Any]
+				if self.outputs.isEmpty {
+					let features = result as? MLDictionaryFeatureProvider
+					outputs = features?.dictionary ?? [:]
+				} else {
+					outputs = self.outputs
+				}
+				self.outputs = [:]
+				self.dict = [:]
+				return ModelOutput(output: outputs, error: nil, cpy: true)
+			} else {
+				return ModelOutput(output: nil, error: RuntimeError("MLState requires macOS 15+"))
+			}
+		} catch {
+			return ModelOutput(output: nil, error: error)
+		}
+	}
+
+	func hasState() -> Bool {
+		return self.state != nil
+	}
+
+	func resetState() {
+		self.state = nil
 	}
 
 	func description() -> ModelDescription {
@@ -663,6 +764,37 @@ class Model: @unchecked Sendable {
 		}
 	}
 
+	func bindOutputI32(
+		shape: RustVec<Int32>, featureName: RustString, data: UnsafeMutablePointer<Int32>,
+		len: UInt
+	) -> Bool {
+		if hasFailedToLoad() { return false }
+		do {
+			var arr: [NSNumber] = []
+			var stride: [NSNumber] = []
+			var m: Int32 = 1
+			for i in shape.reversed() {
+				stride.append(NSNumber(value: m))
+				m = i * m
+			}
+			stride.reverse()
+			for s in shape {
+				arr.append(NSNumber(value: s))
+			}
+			let deallocMultiArrayRust = { (_ ptr: UnsafeMutableRawPointer) in
+				()
+			}
+			let array = try MLMultiArray.init(
+				dataPointer: data, shape: arr, dataType: MLMultiArrayDataType.int32,
+				strides: stride, deallocator: deallocMultiArrayRust)
+			self.outputs[featureName.toString()] = array
+			return true
+		} catch {
+			print("Unexpected output error: \(error)")
+			return false
+		}
+	}
+
 	func predict() -> ModelOutput {
 		if hasFailedToLoad() {
 			return ModelOutput(
@@ -672,6 +804,7 @@ class Model: @unchecked Sendable {
 			let input = try MLDictionaryFeatureProvider.init(dictionary: self.dict)
 			let opts = MLPredictionOptions.init()
 			opts.outputBackings = self.outputs
+
 			let result = try self.model!.prediction(from: input, options: opts)
 			
 			// If we have output backings, use them
@@ -679,7 +812,8 @@ class Model: @unchecked Sendable {
 			if self.outputs.isEmpty {
 				// No output backing - extract from prediction result
 				let features = result as? MLDictionaryFeatureProvider
-				outputs = features?.dictionary ?? [:]
+				let rawDict = features?.dictionary ?? [:]
+				outputs = rawDict
 			} else {
 				// Use output backing
 				outputs = self.outputs

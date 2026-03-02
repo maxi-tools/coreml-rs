@@ -1,4 +1,4 @@
-use coreml_rs::{ CoreMLModelOptions, CoreMLModelWithState };
+use coreml_rs::{CoreMLModelOptions, CoreMLModelWithState};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model_path = "path/to/your/model.mlpackage";
@@ -16,7 +16,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let outputs = model.predict()?;
 
     println!("Prediction complete!");
-    println!("Available outputs: {:?}", outputs.outputs.keys().collect::<Vec<_>>());
+    println!(
+        "Available outputs: {:?}",
+        outputs.outputs.keys().collect::<Vec<_>>()
+    );
 
     Ok(())
 }
