@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {
+        "type": "command",
+        "command": "~/.local/bin/maxi-hook",
+        "args": [
+          "--source",
+          "copilot"
+        ]
+      }
+    ],
+    "postToolUse": [
+      {
+        "type": "command",
+        "command": "~/.local/bin/maxi-hook",
+        "args": [
+          "--source",
+          "copilot"
+        ]
+      }
+    ],
+    "errorOccurred": [
+      {
+        "type": "command",
+        "command": "~/.local/bin/maxi-hook",
+        "args": [
+          "--source",
+          "copilot"
+        ]
+      }
+    ]
+  }
+}
