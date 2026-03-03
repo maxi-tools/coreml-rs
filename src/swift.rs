@@ -179,51 +179,61 @@ impl std::default::Default for ComputePlatform {
     }
 }
 
+/// Take ownership of a raw pointer as a Vec (no copy).
+///
+/// # Safety
+/// `ptr` must have been allocated by Rust with the given `len` as both length and capacity.
+unsafe fn rust_vec_from_ptr<T>(ptr: *mut T, len: usize) -> Vec<T> {
+    Vec::from_raw_parts(ptr, len, len)
+}
+
+/// Copy data from a raw pointer into a new Vec.
+///
+/// # Safety
+/// `ptr` must point to `len` valid, aligned elements of type `T`.
+unsafe fn rust_vec_from_ptr_cpy<T: Clone>(ptr: *const T, len: usize) -> Vec<T> {
+    std::slice::from_raw_parts(ptr, len).to_vec()
+}
+
+/// Free a Vec that was passed to Swift via raw pointer.
+///
+/// # Safety
+/// `ptr` must have been allocated by Rust with the given `len` as both length and capacity.
+unsafe fn rust_vec_free<T>(ptr: *mut T, len: usize) {
+    _ = Vec::from_raw_parts(ptr, len, len);
+}
+
+// Type-specific wrappers required by the CXX bridge
 fn rust_vec_from_ptr_f32(ptr: *mut f32, len: usize) -> Vec<f32> {
-    unsafe { Vec::from_raw_parts(ptr, len, len) }
+    unsafe { rust_vec_from_ptr(ptr, len) }
 }
 fn rust_vec_from_ptr_u16(ptr: *mut u16, len: usize) -> Vec<u16> {
-    unsafe { Vec::from_raw_parts(ptr, len, len) }
+    unsafe { rust_vec_from_ptr(ptr, len) }
 }
 fn rust_vec_from_ptr_i32(ptr: *mut i32, len: usize) -> Vec<i32> {
-    unsafe { Vec::from_raw_parts(ptr, len, len) }
+    unsafe { rust_vec_from_ptr(ptr, len) }
 }
-
-/// performs a memcpy
+// CXX bridge requires *mut; these only read (coerce to *const inside generic)
 fn rust_vec_from_ptr_f32_cpy(ptr: *mut f32, len: usize) -> Vec<f32> {
-    (unsafe { std::slice::from_raw_parts(ptr, len) }).to_vec()
+    unsafe { rust_vec_from_ptr_cpy(ptr, len) }
 }
-/// performs a memcpy
 fn rust_vec_from_ptr_u16_cpy(ptr: *mut u16, len: usize) -> Vec<u16> {
-    (unsafe { std::slice::from_raw_parts(ptr, len) }).to_vec()
+    unsafe { rust_vec_from_ptr_cpy(ptr, len) }
 }
-/// performs a memcpy
 fn rust_vec_from_ptr_i32_cpy(ptr: *mut i32, len: usize) -> Vec<i32> {
-    (unsafe { std::slice::from_raw_parts(ptr, len) }).to_vec()
+    unsafe { rust_vec_from_ptr_cpy(ptr, len) }
 }
-
 fn rust_vec_free_f32(ptr: *mut f32, len: usize) {
-    unsafe {
-        _ = Vec::from_raw_parts(ptr, len, len);
-    }
+    unsafe { rust_vec_free(ptr, len) }
 }
-
 fn rust_vec_free_u16(ptr: *mut u16, len: usize) {
-    unsafe {
-        _ = Vec::from_raw_parts(ptr, len, len);
-    }
+    unsafe { rust_vec_free(ptr, len) }
 }
-
 fn rust_vec_free_u8(ptr: *mut u8, len: usize) {
-    unsafe {
-        _ = Vec::from_raw_parts(ptr, len, len);
-    }
+    unsafe { rust_vec_free(ptr, len) }
 }
-
 fn rust_vec_free_i32(ptr: *mut i32, len: usize) {
-    unsafe {
-        _ = Vec::from_raw_parts(ptr, len, len);
-    }
+    unsafe { rust_vec_free(ptr, len) }
 }
 
 pub struct MLModelOutput {

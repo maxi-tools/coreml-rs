@@ -486,12 +486,10 @@ impl CoreMLModel {
                     matches!(offset, Some(0) | None),
                     "array base offset is not zero; bad aligned input"
                 );
-                if !self.model.bindInputU16(
-                    shape,
-                    name,
-                    data.as_mut_ptr(),
-                    data.capacity(),
-                ) {
+                if !self
+                    .model
+                    .bindInputU16(shape, name, data.as_mut_ptr(), data.capacity())
+                {
                     return Err(CoreMLError::UnknownErrorStatic(
                         "failed to bind u16 input to model",
                     ));
@@ -607,10 +605,14 @@ impl CoreMLModel {
         true
     }
 
-    pub fn predict(&mut self) -> Result<MLModelOutput, CoreMLError> {
+    /// Shared output setup: inspect model description, bind output buffers.
+    /// `allow_empty_shape` controls whether empty shapes also disable output backing
+    /// (needed for stateful models where shapes may be unknown until runtime).
+    fn setup_outputs(
+        &mut self,
+        allow_empty_shape: bool,
+    ) -> Result<(bool, Vec<(String, Vec<usize>, String)>), CoreMLError> {
         let desc = self.model.description();
-
-        // Check if we should use output backing (only for fixed-size outputs)
         let mut use_output_backing = true;
         let mut output_info = Vec::new();
 
@@ -618,15 +620,14 @@ impl CoreMLModel {
             let output_shape = desc.output_shape(name.clone());
             let ty = desc.output_type(name.clone());
 
-            // Skip output backing if any dimension is 0 (flexible size)
-            if output_shape.iter().any(|&dim| dim == 0) {
+            let is_flexible = output_shape.iter().any(|&dim| dim == 0);
+            let is_empty = allow_empty_shape && output_shape.is_empty();
+            if is_flexible || is_empty {
                 use_output_backing = false;
             }
-
             output_info.push((name, output_shape, ty));
         }
 
-        // Only set up output backing for fixed-size outputs
         if use_output_backing {
             for (name, output_shape, ty) in &output_info {
                 match ty.as_str() {
@@ -649,7 +650,6 @@ impl CoreMLModel {
                         );
                     }
                     "bool" | "boolean" => {
-                        // Cast boolean to f32 for output
                         self.add_output_f32(
                             name.clone(),
                             Array::<f32, _>::zeros(output_shape.clone()),
@@ -663,129 +663,102 @@ impl CoreMLModel {
                 }
             }
         }
+        Ok((use_output_backing, output_info))
+    }
 
+    /// Extract flexible outputs from a CoreML prediction result.
+    fn extract_flexible_outputs(
+        output_info: Vec<(String, Vec<usize>, String)>,
+        output: &swift::MLModelOutput,
+    ) -> HashMap<String, MLArray> {
+        let mut outputs = HashMap::new();
+        for (name, _output_shape, ty) in output_info {
+            let actual_shape: Vec<usize> = output.outputShape(name.clone()).into_iter().collect();
+            if actual_shape.is_empty() {
+                eprintln!("warning: output '{}' has no shape data", &name);
+                continue;
+            }
+
+            match ty.as_str() {
+                "f32" | "bool" | "boolean" => {
+                    let out = output.outputF32(name.clone());
+                    if out.is_empty() {
+                        continue;
+                    }
+                    if let Ok(array) = Array::from_shape_vec(ndarray::IxDyn(&actual_shape), out) {
+                        outputs.insert(name, array.into());
+                    }
+                }
+                "f16" | "float16" => {
+                    let out = output.outputU16(name.clone());
+                    if out.is_empty() {
+                        continue;
+                    }
+                    if let Ok(array) = Array::from_shape_vec(ndarray::IxDyn(&actual_shape), out) {
+                        outputs.insert(name, reinterpret_u16_to_f16(array).into());
+                    }
+                }
+                "int32" | "int64" | "int16" | "uint32" | "uint64" | "uint16" => {
+                    let out = output.outputI32(name.clone());
+                    if out.is_empty() {
+                        continue;
+                    }
+                    if let Ok(array) = Array::from_shape_vec(ndarray::IxDyn(&actual_shape), out) {
+                        outputs.insert(name, array.into());
+                    }
+                }
+                _ => {
+                    eprintln!("warning: type not supported, and will be skipped in the output");
+                }
+            }
+        }
+        outputs
+    }
+
+    /// Collect fixed-size outputs from pre-allocated buffers.
+    fn collect_fixed_outputs(&self, output: &swift::MLModelOutput) -> HashMap<String, MLArray> {
+        self.outputs
+            .clone()
+            .into_iter()
+            .filter_map(|(key, (ty, shape))| {
+                let name = key.clone();
+                match ty {
+                    "f32" => {
+                        let out = output.outputF32(name);
+                        Array::from_shape_vec(shape, out)
+                            .ok()
+                            .map(|a| (key, a.into()))
+                    }
+                    "f16" => {
+                        let out = output.outputU16(name);
+                        Array::from_shape_vec(shape, out)
+                            .ok()
+                            .map(|a| (key, reinterpret_u16_to_f16(a).into()))
+                    }
+                    "i32" => {
+                        let out = output.outputI32(name);
+                        Array::from_shape_vec(shape, out)
+                            .ok()
+                            .map(|a| (key, a.into()))
+                    }
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    pub fn predict(&mut self) -> Result<MLModelOutput, CoreMLError> {
+        let (use_output_backing, output_info) = self.setup_outputs(false)?;
         let output = self.model.predict();
         if let Some(err) = output.getError() {
             return Err(CoreMLError::UnknownError(err));
         }
-
-        // For flexible outputs, extract directly from Core ML output
-        if !use_output_backing {
-            let mut outputs = HashMap::new();
-            for (name, _output_shape, ty) in output_info {
-                match ty.as_str() {
-                    "f32" => {
-                        let actual_shape = output.outputShape(name.clone());
-                        let out = output.outputF32(name.clone());
-                        if actual_shape.is_empty() || out.is_empty() {
-                            eprintln!(
-                                "warning: output '{}' has no shape or data (shape={:?}, len={})",
-                                &name,
-                                actual_shape,
-                                out.len()
-                            );
-                            continue;
-                        }
-                        if let Ok(array) = Array::from_shape_vec(ndarray::IxDyn(&actual_shape), out)
-                        {
-                            outputs.insert(name, array.into());
-                        }
-                    }
-                    "f16" | "float16" => {
-                        let actual_shape = output.outputShape(name.clone());
-                        let out = output.outputU16(name.clone());
-                        if actual_shape.is_empty() || out.is_empty() {
-                            eprintln!(
-                                "warning: output '{}' has no shape or data (shape={:?}, len={})",
-                                &name,
-                                actual_shape,
-                                out.len()
-                            );
-                            continue;
-                        }
-                        if let Ok(array) = Array::from_shape_vec(ndarray::IxDyn(&actual_shape), out)
-                        {
-                            let f16_array = reinterpret_u16_to_f16(array);
-                            outputs.insert(name, f16_array.into());
-                        }
-                    }
-                    "int32" | "int64" | "int16" | "uint32" | "uint64" | "uint16" => {
-                        let actual_shape = output.outputShape(name.clone());
-                        let out = output.outputI32(name.clone());
-                        if actual_shape.is_empty() || out.is_empty() {
-                            eprintln!(
-                                "warning: output '{}' has no shape or data (shape={:?}, len={})",
-                                &name,
-                                actual_shape,
-                                out.len()
-                            );
-                            continue;
-                        }
-                        if let Ok(array) = Array::from_shape_vec(ndarray::IxDyn(&actual_shape), out)
-                        {
-                            outputs.insert(name, array.into());
-                        }
-                    }
-                    "bool" | "boolean" => {
-                        let actual_shape = output.outputShape(name.clone());
-                        let out = output.outputF32(name.clone());
-                        if actual_shape.is_empty() || out.is_empty() {
-                            eprintln!(
-                                "warning: output '{}' has no shape or data (shape={:?}, len={})",
-                                &name,
-                                actual_shape,
-                                out.len()
-                            );
-                            continue;
-                        }
-                        if let Ok(array) = Array::from_shape_vec(ndarray::IxDyn(&actual_shape), out)
-                        {
-                            outputs.insert(name, array.into());
-                        }
-                    }
-                    _ => {
-                        eprintln!("warning: type not supported, and will be skipped in the output");
-                    }
-                }
-            }
-            return Ok(MLModelOutput { outputs });
-        }
-
-        // For fixed-size outputs, use the pre-allocated buffers
-        Ok(MLModelOutput {
-            outputs: self
-                .outputs
-                .clone()
-                .into_iter()
-                .filter_map(|(key, (ty, shape))| {
-                    let name = key.clone();
-                    match ty {
-                        "f32" => {
-                            let out = output.outputF32(name);
-                            let array = Array::from_shape_vec(shape, out).ok()?;
-                            Some((key, array.into()))
-                        }
-                        "f16" => {
-                            let out = output.outputU16(name);
-                            let array =
-                                reinterpret_u16_to_f16(Array::from_shape_vec(shape, out).ok()?);
-                            Some((key, array.into()))
-                        }
-                        "i32" => {
-                            let out = output.outputI32(name);
-                            let array = Array::from_shape_vec(shape, out).ok()?;
-                            Some((key, array.into()))
-                        }
-                        _ => {
-                            eprintln!(
-                                "warning: type not supported, and will be skipped in the output"
-                            );
-                            return None;
-                        }
-                    }
-                })
-                .collect(),
-        })
+        let outputs = if !use_output_backing {
+            Self::extract_flexible_outputs(output_info, &output)
+        } else {
+            self.collect_fixed_outputs(&output)
+        };
+        Ok(MLModelOutput { outputs })
     }
 
     pub fn description(&self) -> HashMap<&str, Vec<String>> {
@@ -804,151 +777,17 @@ impl CoreMLModel {
 
     /// Run prediction using CoreML State (KV cache managed in-place by CoreML).
     pub fn predict_with_state(&mut self) -> Result<MLModelOutput, CoreMLError> {
-        let desc = self.model.description();
-
-        let mut use_output_backing = true;
-        let mut output_info = Vec::new();
-
-        for name in desc.output_names() {
-            let output_shape = desc.output_shape(name.clone());
-            let ty = desc.output_type(name.clone());
-            // Empty shape (e.g. stateful models) or flexible dims → skip output backing
-            if output_shape.is_empty() || output_shape.iter().any(|&dim| dim == 0) {
-                use_output_backing = false;
-            }
-            output_info.push((name, output_shape, ty));
-        }
-
-        if use_output_backing {
-            for (name, output_shape, ty) in &output_info {
-                match ty.as_str() {
-                    "f32" => {
-                        self.add_output_f32(
-                            name.clone(),
-                            Array::<f32, _>::zeros(output_shape.clone()),
-                        );
-                    }
-                    "f16" | "float16" => {
-                        self.add_output_u16(
-                            name.clone(),
-                            Array::<u16, _>::zeros(output_shape.clone()),
-                        );
-                    }
-                    "int32" | "int64" | "int16" | "uint32" | "uint64" | "uint16" => {
-                        self.add_output_i32(
-                            name.clone(),
-                            Array::<i32, _>::zeros(output_shape.clone()),
-                        );
-                    }
-                    "bool" | "boolean" => {
-                        // Cast boolean to f32 for output
-                        self.add_output_f32(
-                            name.clone(),
-                            Array::<f32, _>::zeros(output_shape.clone()),
-                        );
-                    }
-                    _ => {
-                        return Err(CoreMLError::UnknownErrorStatic(
-                            "non-f32/f16/i32 output types are not supported (yet)!",
-                        ));
-                    }
-                }
-            }
-        }
-
+        let (use_output_backing, output_info) = self.setup_outputs(true)?;
         let output = self.model.predictWithState();
         if let Some(err) = output.getError() {
             return Err(CoreMLError::UnknownError(err));
         }
-
-        if !use_output_backing {
-            let mut outputs = HashMap::new();
-            for (name, _output_shape, ty) in output_info {
-                match ty.as_str() {
-                    "f32" => {
-                        let actual_shape = output.outputShape(name.clone());
-                        let actual_shape: Vec<usize> = actual_shape.into_iter().collect();
-                        let out = output.outputF32(name.clone());
-                        if actual_shape.is_empty() || out.is_empty() {
-                            continue;
-                        }
-                        if let Ok(array) = Array::from_shape_vec(ndarray::IxDyn(&actual_shape), out)
-                        {
-                            outputs.insert(name, array.into());
-                        }
-                    }
-                    "f16" | "float16" => {
-                        let actual_shape = output.outputShape(name.clone());
-                        let actual_shape: Vec<usize> = actual_shape.into_iter().collect();
-                        let out = output.outputU16(name.clone());
-                        if actual_shape.is_empty() || out.is_empty() {
-                            continue;
-                        }
-                        if let Ok(array) = Array::from_shape_vec(ndarray::IxDyn(&actual_shape), out)
-                        {
-                            let f16_array = reinterpret_u16_to_f16(array);
-                            outputs.insert(name, f16_array.into());
-                        }
-                    }
-                    "int32" | "int64" | "int16" | "uint32" | "uint64" | "uint16" => {
-                        let actual_shape = output.outputShape(name.clone());
-                        let actual_shape: Vec<usize> = actual_shape.into_iter().collect();
-                        let out = output.outputI32(name.clone());
-                        if actual_shape.is_empty() || out.is_empty() {
-                            continue;
-                        }
-                        if let Ok(array) = Array::from_shape_vec(ndarray::IxDyn(&actual_shape), out)
-                        {
-                            outputs.insert(name, array.into());
-                        }
-                    }
-                    "bool" | "boolean" => {
-                        let actual_shape = output.outputShape(name.clone());
-                        let actual_shape: Vec<usize> = actual_shape.into_iter().collect();
-                        let out = output.outputF32(name.clone());
-                        if actual_shape.is_empty() || out.is_empty() {
-                            continue;
-                        }
-                        if let Ok(array) = Array::from_shape_vec(ndarray::IxDyn(&actual_shape), out)
-                        {
-                            outputs.insert(name, array.into());
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            return Ok(MLModelOutput { outputs });
-        }
-
-        Ok(MLModelOutput {
-            outputs: self
-                .outputs
-                .clone()
-                .into_iter()
-                .filter_map(|(key, (ty, shape))| {
-                    let name = key.clone();
-                    match ty {
-                        "f32" => {
-                            let out = output.outputF32(name);
-                            let array = Array::from_shape_vec(shape, out).ok()?;
-                            Some((key, array.into()))
-                        }
-                        "f16" => {
-                            let out = output.outputU16(name);
-                            let array =
-                                reinterpret_u16_to_f16(Array::from_shape_vec(shape, out).ok()?);
-                            Some((key, array.into()))
-                        }
-                        "i32" => {
-                            let out = output.outputI32(name);
-                            let array = Array::from_shape_vec(shape, out).ok()?;
-                            Some((key, array.into()))
-                        }
-                        _ => None,
-                    }
-                })
-                .collect(),
-        })
+        let outputs = if !use_output_backing {
+            Self::extract_flexible_outputs(output_info, &output)
+        } else {
+            self.collect_fixed_outputs(&output)
+        };
+        Ok(MLModelOutput { outputs })
     }
 
     /// Check if this model has an active CoreML State.
