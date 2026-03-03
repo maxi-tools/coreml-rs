@@ -130,11 +130,13 @@ impl MLArray {
         }
     }
 
+    /// Extract the array as a typed tensor. Panics if type doesn't match the variant.
     pub fn extract_to_tensor<T: MLType>(self) -> Array<T, Dim<IxDynImpl>> {
         self.try_extract_to_tensor()
             .unwrap_or_else(|e| panic!("{}", e))
     }
 
+    /// Try to extract as typed tensor. Returns Err if type doesn't match the variant.
     pub fn try_extract_to_tensor<T: MLType>(self) -> Result<Array<T, Dim<IxDynImpl>>, String> {
         let actual = self.type_id();
         let expected = T::TY;
