@@ -25,7 +25,7 @@ jobs:
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          direct_prompt: |
+          prompt: |
             Review the PR diff for this pull request. Focus on:
             - Bugs, logic errors, and security issues
             - Performance problems
