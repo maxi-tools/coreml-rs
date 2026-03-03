@@ -213,6 +213,7 @@ fn rust_vec_from_ptr_u16(ptr: *mut u16, len: usize) -> Vec<u16> {
 fn rust_vec_from_ptr_i32(ptr: *mut i32, len: usize) -> Vec<i32> {
     unsafe { rust_vec_from_ptr(ptr, len) }
 }
+// CXX bridge requires *mut; these only read (coerce to *const inside generic)
 fn rust_vec_from_ptr_f32_cpy(ptr: *mut f32, len: usize) -> Vec<f32> {
     unsafe { rust_vec_from_ptr_cpy(ptr, len) }
 }

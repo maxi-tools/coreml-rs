@@ -675,6 +675,7 @@ impl CoreMLModel {
         for (name, _output_shape, ty) in output_info {
             let actual_shape: Vec<usize> = output.outputShape(name.clone()).into_iter().collect();
             if actual_shape.is_empty() {
+                eprintln!("warning: output '{}' has no shape data", &name);
                 continue;
             }
 
