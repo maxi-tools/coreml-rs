@@ -1,5 +1,5 @@
 use crate::{
-    ffi::{modelWithAssets, modelWithPath, ComputePlatform, Model},
+    ffi::{modelWithAssets, modelWithPath, ComputePlatform, Model, ModelOutput},
     mlarray::MLArray,
     mlbatchmodel::CoreMLBatchModelWithState,
 };
@@ -669,7 +669,7 @@ impl CoreMLModel {
     /// Extract flexible outputs from a CoreML prediction result.
     fn extract_flexible_outputs(
         output_info: Vec<(String, Vec<usize>, String)>,
-        output: &MLModelOutput,
+        output: &ModelOutput,
     ) -> HashMap<String, MLArray> {
         let mut outputs = HashMap::new();
         for (name, _output_shape, ty) in output_info {
@@ -716,7 +716,7 @@ impl CoreMLModel {
     }
 
     /// Collect fixed-size outputs from pre-allocated buffers.
-    fn collect_fixed_outputs(&self, output: &MLModelOutput) -> HashMap<String, MLArray> {
+    fn collect_fixed_outputs(&self, output: &ModelOutput) -> HashMap<String, MLArray> {
         self.outputs
             .clone()
             .into_iter()
