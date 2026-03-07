@@ -414,7 +414,9 @@ impl CoreMLModel {
         let ptr = data.as_mut_ptr();
         let len = data.capacity();
         let res = self.model.bindOutputF32(shape, name, ptr, len);
-        std::mem::forget(data);
+        if res {
+            std::mem::forget(data);
+        }
         res
     }
 
@@ -427,7 +429,9 @@ impl CoreMLModel {
         let ptr = data.as_mut_ptr();
         let len = data.capacity();
         let res = self.model.bindOutputU16(shape, name, ptr, len);
-        std::mem::forget(data);
+        if res {
+            std::mem::forget(data);
+        }
         res
     }
 
@@ -440,7 +444,9 @@ impl CoreMLModel {
         let ptr = data.as_mut_ptr();
         let len = data.capacity();
         let res = self.model.bindOutputI32(shape, name, ptr, len);
-        std::mem::forget(data);
+        if res {
+            std::mem::forget(data);
+        }
         res
     }
 

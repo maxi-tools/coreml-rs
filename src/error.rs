@@ -6,7 +6,7 @@ use thiserror::Error;
 #[non_exhaustive]
 pub enum CoreMLError {
     #[error("CoreML Cache IoError: {0}")]
-    IoError(std::io::Error),
+    IoError(#[from] std::io::Error),
     #[error("BadInputShape: {0}")]
     BadInputShape(String),
     #[error("UnknownError: {0}")]
@@ -22,5 +22,5 @@ pub enum CoreMLError {
     #[error("FailedToLoadBatch: coreml model couldn't be loaded: {0}")]
     FailedToLoadBatchStatic(&'static str, CoreMLBatchModelWithState),
     #[error("FailedToLoadBatch: coreml model couldn't be loaded: {0}")]
-    FailedToBatchLoad(String, CoreMLBatchModelWithState),
+    FailedToLoadBatch(String, CoreMLBatchModelWithState),
 }

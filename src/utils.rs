@@ -35,8 +35,7 @@ pub fn save_buffer_to_disk(vec: &[u8], cache_dir: &mut PathBuf) -> Result<PathBu
         *cache_dir = PathBuf::from(".");
     }
     if !cache_dir.exists() {
-        let _ = std::fs::remove_dir_all(&cache_dir);
-        let _ = std::fs::create_dir_all(&cache_dir);
+        std::fs::create_dir_all(&cache_dir)?;
     }
     // pick the file specified, if it's a folder/dir append model_cache
     let m = if !cache_dir.is_dir() {
@@ -46,23 +45,17 @@ pub fn save_buffer_to_disk(vec: &[u8], cache_dir: &mut PathBuf) -> Result<PathBu
     };
 
     std::fs::File::create(&m)
-        .map_err(CoreMLError::IoError)
         .and_then(|file| {
             flate2::write::ZlibEncoder::new(file, Compression::best())
                 .write_all(vec)
-                .map_err(CoreMLError::IoError)
         })?;
 
     Ok(m)
 }
 
 pub fn load_buffer_from_disk(path: &Path) -> Result<Vec<u8>, CoreMLError> {
-    std::fs::File::open(path)
-        .map_err(CoreMLError::IoError)
-        .and_then(|file| {
-            let mut vec = vec![];
-            std::io::Read::read_to_end(&mut flate2::read::ZlibDecoder::new(file), &mut vec)
-                .map_err(CoreMLError::IoError)?;
-            Ok(vec)
-        })
+    let file = std::fs::File::open(path)?;
+    let mut vec = vec![];
+    std::io::Read::read_to_end(&mut flate2::read::ZlibDecoder::new(file), &mut vec)?;
+    Ok(vec)
 }

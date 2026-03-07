@@ -95,10 +95,16 @@ impl CoreMLBatchModelWithState {
                 Ok(vec) => {
                     let mut coreml_model = CoreMLBatchModel::load_buffer(vec, info.clone());
                     coreml_model.model.load();
+                    if coreml_model.model.failed() {
+                        return Err(CoreMLError::FailedToLoadBatchStatic(
+                            "Failed to load model from cached buffer",
+                            Self::Unloaded(info, CoreMLModelLoader::BufferToDisk(u)),
+                        ));
+                    }
                     let loader = CoreMLModelLoader::BufferToDisk(u);
                     Ok(Self::Loaded(coreml_model, info, loader))
                 }
-                Err(err) => Err(CoreMLError::FailedToBatchLoad(
+                Err(err) => Err(CoreMLError::FailedToLoadBatch(
                     format!("failed to load the model from cached buffer path: {err}"),
                     CoreMLBatchModelWithState::Unloaded(info, CoreMLModelLoader::BufferToDisk(u)),
                 )),
@@ -138,7 +144,7 @@ impl CoreMLBatchModelWithState {
                             {
                                 Ok(m) => CoreMLModelLoader::BufferToDisk(m),
                                 Err(err) => {
-                                    return Err(CoreMLError::FailedToBatchLoad(
+                                    return Err(CoreMLError::FailedToLoadBatch(
                                         format!("failed to load the model from the buffer: {err}"),
                                         CoreMLBatchModelWithState::Unloaded(
                                             info,
