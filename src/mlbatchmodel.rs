@@ -91,12 +91,12 @@ impl CoreMLBatchModelWithState {
             }
             CoreMLModelLoader::BufferToDisk(u) => {
                 match std::fs::File::open(&u)
-                    .map_err(|io| CoreMLError::IoError(io))
+                    .map_err(CoreMLError::IoError)
                     .and_then(|file| {
                         let mut vec = vec![];
                         _ = flate2::read::ZlibDecoder::new(file)
                             .read_to_end(&mut vec)
-                            .map_err(|io| CoreMLError::IoError(io))?;
+                            .map_err(CoreMLError::IoError)?;
                         Ok(vec)
                     }) {
                     Ok(vec) => {
@@ -158,13 +158,13 @@ impl CoreMLBatchModelWithState {
                             } else {
                                 info.opts.cache_dir.join("model_cache")
                             };
-                            match std::fs::File::create(&m)
-                                .map_err(|io| CoreMLError::IoError(io))
-                                .map(|file| {
+                            match std::fs::File::create(&m).map_err(CoreMLError::IoError).map(
+                                |file| {
                                     flate2::write::ZlibEncoder::new(file, Compression::best())
                                         .write_all(&vec)
                                         .map_err(CoreMLError::IoError)
-                                }) {
+                                },
+                            ) {
                                 Ok(_) => {}
                                 Err(err) => {
                                     return Err(CoreMLError::FailedToBatchLoad(
@@ -232,12 +232,11 @@ impl std::fmt::Debug for BatchModel {
 
 impl CoreMLBatchModel {
     pub fn load_from_path(path: String, info: CoreMLModelInfo, compiled: bool) -> Self {
-        let coreml_model = Self {
+        Self {
             model: modelWithPathBatch(path, info.opts.compute_platform, compiled),
             // save_path: None,
             outputs: Default::default(),
-        };
-        coreml_model
+        }
     }
 
     pub fn load_buffer(mut buf: Vec<u8>, info: CoreMLModelInfo) -> Self {

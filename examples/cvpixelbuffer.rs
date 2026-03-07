@@ -1,8 +1,9 @@
+#![allow(clippy::all)]
 use coreml_rs::{CoreMLModelOptions, CoreMLModelWithState};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model_path = "path/to/your/model.mlpackage";
-    let mut model_options = CoreMLModelOptions::default();
+    let model_options = CoreMLModelOptions::default();
 
     // Load the model
     let mut model = CoreMLModelWithState::new(model_path, model_options).load()?;

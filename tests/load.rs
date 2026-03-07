@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 use std::{path::PathBuf, str::FromStr};
 
 use coreml_rs::{mlmodel::CoreMLError, CoreMLModelOptions, CoreMLModelWithState};

@@ -1,7 +1,8 @@
+#![allow(clippy::all)]
 //! Regression tests for MLArray type conversions and contiguity handling.
 //! These tests don't require a CoreML model file.
 
-use coreml_rs::mlarray::{mean_absolute_error, MLArray, MLType};
+use coreml_rs::mlarray::{mean_absolute_error, MLArray};
 use ndarray::{Array, Array2, IxDyn};
 
 #[test]
@@ -81,14 +82,14 @@ fn f16_roundtrip() {
 fn mean_absolute_error_basic() {
     let a = [1.0f32, 2.0, 3.0];
     let b = [1.5f32, 2.5, 3.5];
-    let mae = mean_absolute_error(&a, &b);
+    let mae = mean_absolute_error(a, b);
     assert!((mae - 0.5).abs() < 1e-6);
 }
 
 #[test]
 fn mean_absolute_error_identical() {
     let a = [1.0f32, 2.0, 3.0];
-    let mae = mean_absolute_error(&a, &a);
+    let mae = mean_absolute_error(a, a);
     assert!((mae - 0.0).abs() < 1e-10);
 }
 

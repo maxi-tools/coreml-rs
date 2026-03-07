@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 use coreml_rs::{mlbatchmodel::CoreMLBatchModelWithState, ComputePlatform, CoreMLModelOptions};
 use ndarray::{Array, Array4};
 

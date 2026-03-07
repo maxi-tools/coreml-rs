@@ -149,12 +149,12 @@ impl CoreMLModelWithState {
             }
             CoreMLModelLoader::BufferToDisk(u) => {
                 match std::fs::File::open(&u)
-                    .map_err(|io| CoreMLError::IoError(io))
+                    .map_err(CoreMLError::IoError)
                     .and_then(|file| {
                         let mut vec = vec![];
                         _ = flate2::read::ZlibDecoder::new(file)
                             .read_to_end(&mut vec)
-                            .map_err(|io| CoreMLError::IoError(io))?;
+                            .map_err(CoreMLError::IoError)?;
                         Ok(vec)
                     }) {
                     Ok(vec) => {
@@ -217,13 +217,13 @@ impl CoreMLModelWithState {
                             } else {
                                 info.opts.cache_dir.join("model_cache")
                             };
-                            match std::fs::File::create(&m)
-                                .map_err(|io| CoreMLError::IoError(io))
-                                .map(|file| {
+                            match std::fs::File::create(&m).map_err(CoreMLError::IoError).map(
+                                |file| {
                                     flate2::write::ZlibEncoder::new(file, Compression::best())
                                         .write_all(&vec)
                                         .map_err(CoreMLError::IoError)
-                                }) {
+                                },
+                            ) {
                                 Ok(_) => {}
                                 Err(err) => {
                                     return Err(CoreMLError::FailedToLoad(
@@ -355,11 +355,10 @@ impl std::fmt::Debug for Model {
 
 impl CoreMLModel {
     pub fn load_from_path(path: String, info: CoreMLModelInfo, compiled: bool) -> Self {
-        let coreml_model = Self {
+        Self {
             model: modelWithPath(path, info.opts.compute_platform, compiled),
             outputs: Default::default(),
-        };
-        coreml_model
+        }
     }
 
     pub fn load_buffer(mut buf: Vec<u8>, info: CoreMLModelInfo) -> Self {
@@ -547,7 +546,7 @@ impl CoreMLModel {
         let shape = arr.shape();
         self.outputs
             .insert(tag.as_ref().to_string(), ("f32", shape.to_vec()));
-        let shape: Vec<i32> = shape.into_iter().map(|i| *i as i32).collect();
+        let shape: Vec<i32> = shape.iter().map(|i| *i as i32).collect();
         let (mut data, offset) = arr.extract_to_tensor::<f32>().into_raw_vec_and_offset();
         assert!(
             matches!(offset, Some(0) | None),
@@ -568,7 +567,7 @@ impl CoreMLModel {
         let shape = arr.shape();
         self.outputs
             .insert(tag.as_ref().to_string(), ("f16", shape.to_vec()));
-        let shape: Vec<i32> = shape.into_iter().map(|i| *i as i32).collect();
+        let shape: Vec<i32> = shape.iter().map(|i| *i as i32).collect();
         let (mut data, offset) = arr.extract_to_tensor::<u16>().into_raw_vec_and_offset();
         assert!(
             matches!(offset, Some(0) | None),
@@ -589,7 +588,7 @@ impl CoreMLModel {
         let shape = arr.shape();
         self.outputs
             .insert(tag.as_ref().to_string(), ("i32", shape.to_vec()));
-        let shape: Vec<i32> = shape.into_iter().map(|i| *i as i32).collect();
+        let shape: Vec<i32> = shape.iter().map(|i| *i as i32).collect();
         let (mut data, offset) = arr.extract_to_tensor::<i32>().into_raw_vec_and_offset();
         assert!(
             matches!(offset, Some(0) | None),
