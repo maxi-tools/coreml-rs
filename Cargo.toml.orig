@@ -5,9 +5,6 @@ edition = "2021"
 description = "CoreML bindings for Rust using swift-bridge to maximize performance"
 license-file = "LICENSE"
 
-[lib]
-name = "coreml_rs"
-
 [dependencies]
 anyhow = { version = "1", features = ["backtrace"] }
 bytemuck = "1.21.0"
