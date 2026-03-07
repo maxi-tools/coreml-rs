@@ -67,14 +67,14 @@ pub fn mean_absolute_error<
 }
 
 /// Type ID constants used by MLType trait and MLArray dispatch.
-pub const TY_F32: usize = 0;
-pub const TY_F16: usize = 1;
-pub const TY_I32: usize = 2;
-pub const TY_U16: usize = 3;
-pub const TY_U8: usize = 4;
-pub const TY_I16: usize = 5;
-pub const TY_I8: usize = 6;
-pub const TY_U32: usize = 7;
+pub(crate) const TY_F32: usize = 0;
+pub(crate) const TY_F16: usize = 1;
+pub(crate) const TY_I32: usize = 2;
+pub(crate) const TY_U16: usize = 3;
+pub(crate) const TY_U8: usize = 4;
+pub(crate) const TY_I16: usize = 5;
+pub(crate) const TY_I8: usize = 6;
+pub(crate) const TY_U32: usize = 7;
 
 pub trait MLType {
     const TY: usize;
@@ -104,9 +104,6 @@ impl MLType for i8 {
 impl MLType for u32 {
     const TY: usize = TY_U32;
 }
-// impl MLType for i8 {
-//     const TY: usize = 8;
-// }
 
 impl<T: MLType> From<ArrayBase<OwnedRepr<T>, Dim<IxDynImpl>>> for MLArray {
     fn from(value: ArrayBase<OwnedRepr<T>, Dim<IxDynImpl>>) -> Self {
@@ -129,14 +126,14 @@ impl<T: MLType> From<ArrayBase<OwnedRepr<T>, Dim<IxDynImpl>>> for MLArray {
 impl MLArray {
     fn type_id(&self) -> usize {
         match self {
-            MLArray::Float32Array(_) => 0,
-            MLArray::Float16Array(_) => 1,
-            MLArray::Int32Array(_) => 2,
-            MLArray::Int16Array(_) => 5,
-            MLArray::Int8Array(_) => 6,
-            MLArray::UInt32Array(_) => 7,
-            MLArray::UInt16Array(_) => 3,
-            MLArray::UInt8Array(_) => 4,
+            MLArray::Float32Array(_) => TY_F32,
+            MLArray::Float16Array(_) => TY_F16,
+            MLArray::Int32Array(_) => TY_I32,
+            MLArray::Int16Array(_) => TY_I16,
+            MLArray::Int8Array(_) => TY_I8,
+            MLArray::UInt32Array(_) => TY_U32,
+            MLArray::UInt16Array(_) => TY_U16,
+            MLArray::UInt8Array(_) => TY_U8,
         }
     }
 
