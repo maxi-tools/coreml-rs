@@ -39,7 +39,7 @@ fn main() {
         "cargo:rustc-link-search={}/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx/",
         &xcode_path
     );
-    println!("cargo:rustc-link-search={}", "/usr/lib/swift");
+    println!("cargo:rustc-link-search=/usr/lib/swift");
 }
 
 fn compile_swift() {
@@ -47,15 +47,15 @@ fn compile_swift() {
 
     let triple = std::env::var("TARGET").unwrap();
     let parts = triple.split("-").collect::<Vec<_>>();
-    let arch = parts.first().clone().unwrap();
+    let arch = parts.first().unwrap();
 
     let mut cmd = Command::new("swift");
 
     cmd.current_dir(swift_package_dir)
         .arg("build")
-        .args(&["--arch", &arch])
-        .args(&["-Xswiftc", "-static"])
-        .args(&[
+        .args(["--arch", arch])
+        .args(["-Xswiftc", "-static"])
+        .args([
             "-Xswiftc",
             "-import-objc-header",
             "-Xswiftc",
@@ -66,7 +66,7 @@ fn compile_swift() {
         ]);
 
     if is_release_build() {
-        cmd.args(&["-c", "release"]);
+        cmd.args(["-c", "release"]);
     }
 
     let child = cmd.spawn().unwrap_or_else(|e| {

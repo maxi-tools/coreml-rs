@@ -1,7 +1,8 @@
+#![allow(clippy::all)]
 //! Regression tests for MLArray type conversions and contiguity handling.
 //! These tests don't require a CoreML model file.
 
-use coreml_rs::mlarray::{MLArray, MLType, mean_absolute_error};
+use coreml_rs::mlarray::{mean_absolute_error, MLArray};
 use ndarray::{Array, Array2, IxDyn};
 
 #[test]
@@ -81,21 +82,22 @@ fn f16_roundtrip() {
 fn mean_absolute_error_basic() {
     let a = [1.0f32, 2.0, 3.0];
     let b = [1.5f32, 2.5, 3.5];
-    let mae = mean_absolute_error(&a, &b);
+    let mae = mean_absolute_error(a, b);
     assert!((mae - 0.5).abs() < 1e-6);
 }
 
 #[test]
 fn mean_absolute_error_identical() {
     let a = [1.0f32, 2.0, 3.0];
-    let mae = mean_absolute_error(&a, &a);
+    let mae = mean_absolute_error(a, a);
     assert!((mae - 0.0).abs() < 1e-10);
 }
 
 #[test]
 fn transposed_f32_is_standard_layout() {
     // Create a non-contiguous array (transposed)
-    let arr: Array2<f32> = Array2::from_shape_vec((2, 3), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+    let arr: Array2<f32> =
+        Array2::from_shape_vec((2, 3), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
     let transposed = arr.t().to_owned();
     // as_standard_layout should produce a C-contiguous copy
     let contiguous = transposed.as_standard_layout().into_owned();
