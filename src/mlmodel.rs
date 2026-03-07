@@ -1,3 +1,4 @@
+use crate::mlarray::MLArrayBaseExt;
 use crate::{
     ffi::{modelWithAssets, modelWithPath, ComputePlatform, Model, ModelOutput},
     mlarray::MLArray,
@@ -14,64 +15,11 @@ use tempfile::NamedTempFile;
 
 pub use crate::swift::MLModelOutput;
 
-use thiserror::Error;
+pub use crate::error::CoreMLError;
 
-#[derive(Error, Debug)]
-#[non_exhaustive]
-pub enum CoreMLError {
-    #[error("CoreML Cache IoError: {0}")]
-    IoError(std::io::Error),
-    #[error("BadInputShape: {0}")]
-    BadInputShape(String),
-    // #[error("Lz4 Decompression Error: {0}")]
-    // Lz4DecompressError(DecompressError),
-    #[error("UnknownError: {0}")]
-    UnknownError(String),
-    #[error("UnknownError: {0}")]
-    UnknownErrorStatic(&'static str),
-    #[error("ModelNotLoaded: coreml model not loaded into session")]
-    ModelNotLoaded,
-    #[error("FailedToLoad: coreml model couldn't be loaded: {0}")]
-    FailedToLoadStatic(&'static str, CoreMLModelWithState),
-    #[error("FailedToLoad: coreml model couldn't be loaded: {0}")]
-    FailedToLoad(String, CoreMLModelWithState),
-    #[error("FailedToLoadBatch: coreml model couldn't be loaded: {0}")]
-    FailedToLoadBatchStatic(&'static str, CoreMLBatchModelWithState),
-    #[error("FailedToLoadBatch: coreml model couldn't be loaded: {0}")]
-    FailedToBatchLoad(String, CoreMLBatchModelWithState),
-}
+pub use crate::loader::CoreMLModelOptions;
 
-#[derive(Default, Clone)]
-pub struct CoreMLModelOptions {
-    pub compute_platform: ComputePlatform,
-    pub cache_dir: PathBuf,
-}
-
-impl std::fmt::Debug for CoreMLModelOptions {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CoreMLModelOptions")
-            .field(
-                "compute_platform",
-                match self.compute_platform {
-                    ComputePlatform::Cpu => &"CPU",
-                    ComputePlatform::CpuAndANE => &"CpuAndAne",
-                    ComputePlatform::CpuAndGpu => &"CpuAndGpu",
-                },
-            )
-            .finish()
-    }
-}
-
-#[derive(Debug)]
-pub enum CoreMLModelLoader {
-    /// Model to be loaded from the given path
-    ModelPath(PathBuf),
-    /// Model cache built and stored at path, to be used for faster reload
-    CompiledPath(PathBuf),
-    /// Model with buffer to manage the buffer locally
-    Buffer(Vec<u8>),
-    BufferToDisk(PathBuf),
-}
+pub use crate::loader::CoreMLModelLoader;
 
 #[derive(Debug)]
 pub enum CoreMLModelWithState {
@@ -147,28 +95,18 @@ impl CoreMLModelWithState {
                 let loader = CoreMLModelLoader::Buffer(vec);
                 Ok(Self::Loaded(coreml_model, info, loader))
             }
-            CoreMLModelLoader::BufferToDisk(u) => {
-                match std::fs::File::open(&u)
-                    .map_err(CoreMLError::IoError)
-                    .and_then(|file| {
-                        let mut vec = vec![];
-                        _ = flate2::read::ZlibDecoder::new(file)
-                            .read_to_end(&mut vec)
-                            .map_err(CoreMLError::IoError)?;
-                        Ok(vec)
-                    }) {
-                    Ok(vec) => {
-                        let mut coreml_model = CoreMLModel::load_buffer(vec, info.clone());
-                        coreml_model.model.load();
-                        let loader = CoreMLModelLoader::BufferToDisk(u);
-                        Ok(Self::Loaded(coreml_model, info, loader))
-                    }
-                    Err(err) => Err(CoreMLError::FailedToLoad(
-                        format!("failed to load the model from cached buffer path: {err}"),
-                        CoreMLModelWithState::Unloaded(info, CoreMLModelLoader::BufferToDisk(u)),
-                    )),
+            CoreMLModelLoader::BufferToDisk(u) => match crate::utils::load_buffer_from_disk(&u) {
+                Ok(vec) => {
+                    let mut coreml_model = CoreMLModel::load_buffer(vec, info.clone());
+                    coreml_model.model.load();
+                    let loader = CoreMLModelLoader::BufferToDisk(u);
+                    Ok(Self::Loaded(coreml_model, info, loader))
                 }
-            }
+                Err(err) => Err(CoreMLError::FailedToLoad(
+                    format!("failed to load the model from cached buffer path: {err}"),
+                    CoreMLModelWithState::Unloaded(info, CoreMLModelLoader::BufferToDisk(u)),
+                )),
+            },
         }
     }
 
@@ -204,27 +142,9 @@ impl CoreMLModelWithState {
                 let loader = {
                     match loader {
                         CoreMLModelLoader::Buffer(vec) => {
-                            if info.opts.cache_dir.as_os_str().is_empty() {
-                                info.opts.cache_dir = PathBuf::from(".");
-                            }
-                            if !info.opts.cache_dir.exists() {
-                                _ = std::fs::remove_dir_all(&info.opts.cache_dir);
-                                _ = std::fs::create_dir_all(&info.opts.cache_dir);
-                            }
-                            // pick the file specified, if it's a folder/dir append model_cache
-                            let m = if !info.opts.cache_dir.is_dir() {
-                                info.opts.cache_dir.clone()
-                            } else {
-                                info.opts.cache_dir.join("model_cache")
-                            };
-                            match std::fs::File::create(&m).map_err(CoreMLError::IoError).map(
-                                |file| {
-                                    flate2::write::ZlibEncoder::new(file, Compression::best())
-                                        .write_all(&vec)
-                                        .map_err(CoreMLError::IoError)
-                                },
-                            ) {
-                                Ok(_) => {}
+                            match crate::utils::save_buffer_to_disk(&vec, &mut info.opts.cache_dir)
+                            {
+                                Ok(m) => CoreMLModelLoader::BufferToDisk(m),
                                 Err(err) => {
                                     return Err(CoreMLError::FailedToLoad(
                                         format!("failed to load the model from the buffer: {err}"),
@@ -235,7 +155,6 @@ impl CoreMLModelWithState {
                                     ));
                                 }
                             }
-                            CoreMLModelLoader::BufferToDisk(m)
                         }
                         loader => loader,
                     }
@@ -333,11 +252,7 @@ impl CoreMLModelWithState {
     }
 }
 
-// Info required to create a coreml model
-#[derive(Debug, Clone)]
-pub struct CoreMLModelInfo {
-    pub opts: CoreMLModelOptions,
-}
+pub use crate::loader::CoreMLModelInfo;
 
 #[derive(Debug)]
 pub struct CoreMLModel {
@@ -385,36 +300,12 @@ impl CoreMLModel {
         let desc = self.model.description();
         let shape: Vec<usize> = input.shape().to_vec();
         let arr = desc.input_shape(name.clone());
-        if arr.is_empty() && !shape.is_empty() {
-            return Err(CoreMLError::BadInputShape(format!(
-                "Input feature name '{name}' not expected!"
-            )));
-        }
-        // Flexible shape matching: 0 means any dimension (ct.RangeDim)
-        if arr.len() != shape.len()
-            || !arr
-                .iter()
-                .zip(shape.iter())
-                .all(|(&c, &a)| c == 0 || c == a)
-        {
-            return Err(CoreMLError::BadInputShape(format!(
-                "expected shape {arr:?} found {shape:?}"
-            )));
-        }
+        crate::utils::validate_coreml_shape(&arr, &shape, &name)?;
         match input {
             MLArray::Float32Array(array_base) => {
                 // Ensure C-contiguous layout before extracting raw data,
                 // since bindInput assumes C-contiguous strides.
-                let contiguous = if array_base.is_standard_layout() {
-                    array_base
-                } else {
-                    array_base.as_standard_layout().into_owned()
-                };
-                let (mut data, offset) = contiguous.into_raw_vec_and_offset();
-                assert!(
-                    matches!(offset, Some(0) | None),
-                    "array base offset is not zero; bad aligned input"
-                );
+                let mut data = array_base.into_contiguous_raw_vec();
                 if !self
                     .model
                     .bindInputF32(shape, name, data.as_mut_ptr(), data.capacity())
@@ -428,16 +319,7 @@ impl CoreMLModel {
             MLArray::Float16Array(array_base) => {
                 // Ensure C-contiguous layout before extracting raw data,
                 // since bindInput assumes C-contiguous strides.
-                let contiguous = if array_base.is_standard_layout() {
-                    array_base
-                } else {
-                    array_base.as_standard_layout().into_owned()
-                };
-                let (mut data, offset) = contiguous.into_raw_vec_and_offset();
-                assert!(
-                    matches!(offset, Some(0) | None),
-                    "array base offset is not zero; bad aligned input"
-                );
+                let mut data = array_base.into_contiguous_raw_vec();
                 if !self.model.bindInputU16(
                     shape,
                     name,
@@ -453,16 +335,7 @@ impl CoreMLModel {
             MLArray::Int32Array(array_base) => {
                 // Ensure C-contiguous layout before extracting raw data,
                 // since bindInput assumes C-contiguous strides.
-                let contiguous = if array_base.is_standard_layout() {
-                    array_base
-                } else {
-                    array_base.as_standard_layout().into_owned()
-                };
-                let (mut data, offset) = contiguous.into_raw_vec_and_offset();
-                assert!(
-                    matches!(offset, Some(0) | None),
-                    "array base offset is not zero; bad aligned input"
-                );
+                let mut data = array_base.into_contiguous_raw_vec();
                 if !self
                     .model
                     .bindInputI32(shape, name, data.as_mut_ptr(), data.capacity())
@@ -475,16 +348,7 @@ impl CoreMLModel {
             }
             MLArray::UInt16Array(array_base) => {
                 // UInt16 uses the same Swift binding as Float16 (bindInputU16)
-                let contiguous = if array_base.is_standard_layout() {
-                    array_base
-                } else {
-                    array_base.as_standard_layout().into_owned()
-                };
-                let (mut data, offset) = contiguous.into_raw_vec_and_offset();
-                assert!(
-                    matches!(offset, Some(0) | None),
-                    "array base offset is not zero; bad aligned input"
-                );
+                let mut data = array_base.into_contiguous_raw_vec();
                 if !self
                     .model
                     .bindInputU16(shape, name, data.as_mut_ptr(), data.capacity())
@@ -543,65 +407,41 @@ impl CoreMLModel {
 
     pub fn add_output_f32(&mut self, tag: impl AsRef<str>, out: impl Into<MLArray>) -> bool {
         let arr: MLArray = out.into();
-        let shape = arr.shape();
         self.outputs
-            .insert(tag.as_ref().to_string(), ("f32", shape.to_vec()));
-        let shape: Vec<i32> = shape.iter().map(|i| *i as i32).collect();
-        let (mut data, offset) = arr.extract_to_tensor::<f32>().into_raw_vec_and_offset();
-        assert!(
-            matches!(offset, Some(0) | None),
-            "array base offset is not zero; bad aligned output buffer"
-        );
+            .insert(tag.as_ref().to_string(), ("f32", arr.shape().to_vec()));
+        let (mut data, shape) = arr.into_contiguous_raw_vec_and_shape::<f32>();
         let name = tag.as_ref().to_string();
         let ptr = data.as_mut_ptr();
         let len = data.capacity();
-        if !self.model.bindOutputF32(shape, name, ptr, len) {
-            return false;
-        }
+        let res = self.model.bindOutputF32(shape, name, ptr, len);
         std::mem::forget(data);
-        true
+        res
     }
 
     pub fn add_output_u16(&mut self, tag: impl AsRef<str>, out: impl Into<MLArray>) -> bool {
         let arr: MLArray = out.into();
-        let shape = arr.shape();
         self.outputs
-            .insert(tag.as_ref().to_string(), ("f16", shape.to_vec()));
-        let shape: Vec<i32> = shape.iter().map(|i| *i as i32).collect();
-        let (mut data, offset) = arr.extract_to_tensor::<u16>().into_raw_vec_and_offset();
-        assert!(
-            matches!(offset, Some(0) | None),
-            "array base offset is not zero; bad aligned output buffer"
-        );
+            .insert(tag.as_ref().to_string(), ("f16", arr.shape().to_vec()));
+        let (mut data, shape) = arr.into_contiguous_raw_vec_and_shape::<u16>();
         let name = tag.as_ref().to_string();
         let ptr = data.as_mut_ptr();
         let len = data.capacity();
-        if !self.model.bindOutputU16(shape, name, ptr, len) {
-            return false;
-        }
+        let res = self.model.bindOutputU16(shape, name, ptr, len);
         std::mem::forget(data);
-        true
+        res
     }
 
     pub fn add_output_i32(&mut self, tag: impl AsRef<str>, out: impl Into<MLArray>) -> bool {
         let arr: MLArray = out.into();
-        let shape = arr.shape();
         self.outputs
-            .insert(tag.as_ref().to_string(), ("i32", shape.to_vec()));
-        let shape: Vec<i32> = shape.iter().map(|i| *i as i32).collect();
-        let (mut data, offset) = arr.extract_to_tensor::<i32>().into_raw_vec_and_offset();
-        assert!(
-            matches!(offset, Some(0) | None),
-            "array base offset is not zero; bad aligned output buffer"
-        );
+            .insert(tag.as_ref().to_string(), ("i32", arr.shape().to_vec()));
+        let (mut data, shape) = arr.into_contiguous_raw_vec_and_shape::<i32>();
         let name = tag.as_ref().to_string();
         let ptr = data.as_mut_ptr();
         let len = data.capacity();
-        if !self.model.bindOutputI32(shape, name, ptr, len) {
-            return false;
-        }
+        let res = self.model.bindOutputI32(shape, name, ptr, len);
         std::mem::forget(data);
-        true
+        res
     }
 
     /// Shared output setup: inspect model description, bind output buffers.
