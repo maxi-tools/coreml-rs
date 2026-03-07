@@ -683,6 +683,7 @@ impl CoreMLModel {
                 "f32" | "bool" | "boolean" => {
                     let out = output.outputF32(name.clone());
                     if out.is_empty() {
+                        eprintln!("warning: output '{}' returned empty data", &name);
                         continue;
                     }
                     if let Ok(array) = Array::from_shape_vec(ndarray::IxDyn(&actual_shape), out) {
@@ -692,6 +693,7 @@ impl CoreMLModel {
                 "f16" | "float16" => {
                     let out = output.outputU16(name.clone());
                     if out.is_empty() {
+                        eprintln!("warning: output '{}' returned empty data", &name);
                         continue;
                     }
                     if let Ok(array) = Array::from_shape_vec(ndarray::IxDyn(&actual_shape), out) {
@@ -701,6 +703,7 @@ impl CoreMLModel {
                 "int32" | "int64" | "int16" | "uint32" | "uint64" | "uint16" => {
                     let out = output.outputI32(name.clone());
                     if out.is_empty() {
+                        eprintln!("warning: output '{}' returned empty data", &name);
                         continue;
                     }
                     if let Ok(array) = Array::from_shape_vec(ndarray::IxDyn(&actual_shape), out) {

@@ -66,33 +66,43 @@ pub fn mean_absolute_error<
     sum / count as f64
 }
 
+/// Type ID constants used by MLType trait and MLArray dispatch.
+pub const TY_F32: usize = 0;
+pub const TY_F16: usize = 1;
+pub const TY_I32: usize = 2;
+pub const TY_U16: usize = 3;
+pub const TY_U8: usize = 4;
+pub const TY_I16: usize = 5;
+pub const TY_I8: usize = 6;
+pub const TY_U32: usize = 7;
+
 pub trait MLType {
     const TY: usize;
 }
 
 impl MLType for f32 {
-    const TY: usize = 0;
+    const TY: usize = TY_F32;
 }
 impl MLType for half::f16 {
-    const TY: usize = 1;
+    const TY: usize = TY_F16;
 }
 impl MLType for i32 {
-    const TY: usize = 2;
+    const TY: usize = TY_I32;
 }
 impl MLType for u16 {
-    const TY: usize = 3;
+    const TY: usize = TY_U16;
 }
 impl MLType for u8 {
-    const TY: usize = 4;
+    const TY: usize = TY_U8;
 }
 impl MLType for i16 {
-    const TY: usize = 5;
+    const TY: usize = TY_I16;
 }
 impl MLType for i8 {
-    const TY: usize = 6;
+    const TY: usize = TY_I8;
 }
 impl MLType for u32 {
-    const TY: usize = 7;
+    const TY: usize = TY_U32;
 }
 // impl MLType for i8 {
 //     const TY: usize = 8;
@@ -102,14 +112,14 @@ impl<T: MLType> From<ArrayBase<OwnedRepr<T>, Dim<IxDynImpl>>> for MLArray {
     fn from(value: ArrayBase<OwnedRepr<T>, Dim<IxDynImpl>>) -> Self {
         unsafe {
             match T::TY {
-                0 => MLArray::Float32Array(std::mem::transmute(value)),
-                1 => MLArray::Float16Array(std::mem::transmute(value)),
-                2 => MLArray::Int32Array(std::mem::transmute(value)),
-                3 => MLArray::UInt16Array(std::mem::transmute(value)),
-                4 => MLArray::UInt8Array(std::mem::transmute(value)),
-                5 => MLArray::Int16Array(std::mem::transmute(value)),
-                6 => MLArray::Int8Array(std::mem::transmute(value)),
-                7 => MLArray::UInt32Array(std::mem::transmute(value)),
+                TY_F32 => MLArray::Float32Array(std::mem::transmute(value)),
+                TY_F16 => MLArray::Float16Array(std::mem::transmute(value)),
+                TY_I32 => MLArray::Int32Array(std::mem::transmute(value)),
+                TY_U16 => MLArray::UInt16Array(std::mem::transmute(value)),
+                TY_U8 => MLArray::UInt8Array(std::mem::transmute(value)),
+                TY_I16 => MLArray::Int16Array(std::mem::transmute(value)),
+                TY_I8 => MLArray::Int8Array(std::mem::transmute(value)),
+                TY_U32 => MLArray::UInt32Array(std::mem::transmute(value)),
                 _ => panic!("not supported"),
             }
         }
