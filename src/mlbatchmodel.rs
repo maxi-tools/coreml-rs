@@ -7,13 +7,8 @@ use crate::{
     swift::MLBatchModelOutput,
     CoreMLModelOptions,
 };
-use flate2::Compression;
 use ndarray::Array;
-use std::{
-    collections::HashMap,
-    io::{Read, Write},
-    path::{Path, PathBuf},
-};
+use std::{collections::HashMap, io::Write, path::Path};
 use tempfile::NamedTempFile;
 
 pub use crate::swift::MLModelOutput;

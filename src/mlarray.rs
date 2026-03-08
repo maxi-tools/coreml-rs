@@ -195,7 +195,7 @@ pub trait MLArrayBaseExt {
 }
 
 impl MLArray {
-    pub fn into_contiguous_raw_vec_and_shape<T: MLType>(self) -> (Vec<T>, Vec<i32>) {
+    pub fn into_contiguous_raw_vec_and_shape<T: MLType + Clone>(self) -> (Vec<T>, Vec<i32>) {
         let shape = self.shape().iter().map(|&i| i as i32).collect::<Vec<i32>>();
         let data = self.extract_to_tensor::<T>().into_contiguous_raw_vec();
         (data, shape)
@@ -205,7 +205,7 @@ impl MLArray {
 use ndarray::ArrayView;
 
 impl MLArray {
-    pub fn try_as_view_f32(&self) -> Result<ArrayView<f32, Dim<IxDynImpl>>, String> {
+    pub fn try_as_view_f32(&self) -> Result<ArrayView<'_, f32, Dim<IxDynImpl>>, String> {
         if let MLArray::Float32Array(a) = self {
             Ok(a.view())
         } else {
@@ -216,7 +216,7 @@ impl MLArray {
         }
     }
 
-    pub fn try_as_view_f16(&self) -> Result<ArrayView<f16, Dim<IxDynImpl>>, String> {
+    pub fn try_as_view_f16(&self) -> Result<ArrayView<'_, f16, Dim<IxDynImpl>>, String> {
         if let MLArray::Float16Array(a) = self {
             Ok(a.view())
         } else {
@@ -227,7 +227,7 @@ impl MLArray {
         }
     }
 
-    pub fn try_as_view_i32(&self) -> Result<ArrayView<i32, Dim<IxDynImpl>>, String> {
+    pub fn try_as_view_i32(&self) -> Result<ArrayView<'_, i32, Dim<IxDynImpl>>, String> {
         if let MLArray::Int32Array(a) = self {
             Ok(a.view())
         } else {
@@ -238,7 +238,7 @@ impl MLArray {
         }
     }
 
-    pub fn try_as_view_i16(&self) -> Result<ArrayView<i16, Dim<IxDynImpl>>, String> {
+    pub fn try_as_view_i16(&self) -> Result<ArrayView<'_, i16, Dim<IxDynImpl>>, String> {
         if let MLArray::Int16Array(a) = self {
             Ok(a.view())
         } else {
@@ -249,7 +249,7 @@ impl MLArray {
         }
     }
 
-    pub fn try_as_view_i8(&self) -> Result<ArrayView<i8, Dim<IxDynImpl>>, String> {
+    pub fn try_as_view_i8(&self) -> Result<ArrayView<'_, i8, Dim<IxDynImpl>>, String> {
         if let MLArray::Int8Array(a) = self {
             Ok(a.view())
         } else {
@@ -260,7 +260,7 @@ impl MLArray {
         }
     }
 
-    pub fn try_as_view_u32(&self) -> Result<ArrayView<u32, Dim<IxDynImpl>>, String> {
+    pub fn try_as_view_u32(&self) -> Result<ArrayView<'_, u32, Dim<IxDynImpl>>, String> {
         if let MLArray::UInt32Array(a) = self {
             Ok(a.view())
         } else {
@@ -271,7 +271,7 @@ impl MLArray {
         }
     }
 
-    pub fn try_as_view_u16(&self) -> Result<ArrayView<u16, Dim<IxDynImpl>>, String> {
+    pub fn try_as_view_u16(&self) -> Result<ArrayView<'_, u16, Dim<IxDynImpl>>, String> {
         if let MLArray::UInt16Array(a) = self {
             Ok(a.view())
         } else {
@@ -282,7 +282,7 @@ impl MLArray {
         }
     }
 
-    pub fn try_as_view_u8(&self) -> Result<ArrayView<u8, Dim<IxDynImpl>>, String> {
+    pub fn try_as_view_u8(&self) -> Result<ArrayView<'_, u8, Dim<IxDynImpl>>, String> {
         if let MLArray::UInt8Array(a) = self {
             Ok(a.view())
         } else {
@@ -306,5 +306,77 @@ impl MLArray {
             MLArray::UInt16Array(_) => "u16",
             MLArray::UInt8Array(_) => "u8",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ndarray::{Array, IxDyn};
+
+    #[test]
+    fn test_mean_absolute_error_bytes() {
+        let lhs: Vec<f32> = vec![1.0, 2.0, 3.0];
+        let rhs: Vec<f32> = vec![1.5, 2.0, 2.0];
+        let lhs_bytes = bytemuck::cast_slice(&lhs);
+        let rhs_bytes = bytemuck::cast_slice(&rhs);
+        let mae = mean_absolute_error_bytes::<f32>(lhs_bytes, rhs_bytes);
+        assert!((mae - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    #[should_panic(expected = "lhs and rhs have different lengths")]
+    fn test_mean_absolute_error_bytes_length_mismatch() {
+        let lhs: Vec<f32> = vec![1.0];
+        let rhs: Vec<f32> = vec![1.5, 2.0];
+        let lhs_bytes = bytemuck::cast_slice(&lhs);
+        let rhs_bytes = bytemuck::cast_slice(&rhs);
+        mean_absolute_error_bytes::<f32>(lhs_bytes, rhs_bytes);
+    }
+
+    #[test]
+    fn test_try_as_view() {
+        let arr = Array::from_shape_vec(IxDyn(&[2]), vec![1.0f32, 2.0]).unwrap();
+        let ml: MLArray = arr.into();
+        assert!(ml.try_as_view_f32().is_ok());
+        assert!(ml.try_as_view_i32().is_err());
+        assert_eq!(
+            ml.try_as_view_i32().unwrap_err(),
+            "MLArray type mismatch: expected i32, found type_id=f32"
+        );
+
+        let arr_i32 = Array::from_shape_vec(IxDyn(&[1]), vec![10i32]).unwrap();
+        let ml_i32: MLArray = arr_i32.into();
+        assert!(ml_i32.try_as_view_i32().is_ok());
+        assert!(ml_i32.try_as_view_f32().is_err());
+    }
+
+    #[test]
+    fn test_into_contiguous_raw_vec_and_shape() {
+        let arr =
+            Array::from_shape_vec(IxDyn(&[2, 3]), vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+        let ml: MLArray = arr.into();
+        let (vec, shape) = ml.into_contiguous_raw_vec_and_shape::<f32>();
+        assert_eq!(vec, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(shape, vec![2, 3]);
+    }
+
+    #[test]
+    fn test_try_extract_to_tensor() {
+        let arr = Array::from_shape_vec(IxDyn(&[2]), vec![1.0f32, 2.0]).unwrap();
+        let ml: MLArray = arr.into();
+
+        let extracted = ml.try_extract_to_tensor::<f32>();
+        assert!(extracted.is_ok());
+        assert_eq!(extracted.unwrap().shape(), &[2]);
+    }
+
+    #[test]
+    fn test_extract_to_tensor_panic() {
+        let arr = Array::from_shape_vec(IxDyn(&[1]), vec![10i32]).unwrap();
+        let ml: MLArray = arr.into();
+
+        let result = std::panic::catch_unwind(|| ml.extract_to_tensor::<f32>());
+        assert!(result.is_err());
     }
 }
