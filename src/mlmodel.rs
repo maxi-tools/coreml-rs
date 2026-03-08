@@ -1,16 +1,10 @@
 use crate::mlarray::MLArrayBaseExt;
 use crate::{
-    ffi::{modelWithAssets, modelWithPath, ComputePlatform, Model, ModelOutput},
+    ffi::{modelWithAssets, modelWithPath, Model, ModelOutput},
     mlarray::MLArray,
-    mlbatchmodel::CoreMLBatchModelWithState,
 };
-use flate2::Compression;
 use ndarray::Array;
-use std::{
-    collections::HashMap,
-    io::{Read, Write},
-    path::{Path, PathBuf},
-};
+use std::{collections::HashMap, io::Write, path::Path};
 use tempfile::NamedTempFile;
 
 pub use crate::swift::MLModelOutput;
@@ -124,7 +118,9 @@ impl CoreMLModelWithState {
                     }
                     CoreMLModelLoader::ModelPath(_) => {
                         // if the model is loaded from modelPath it has to have compiled path
-                        let path = model.model.compiled_path().unwrap();
+                        let path = model.model.compiled_path().ok_or_else(|| {
+                            CoreMLError::UnknownError("Compiled path not found".to_string())
+                        })?;
                         CoreMLModelLoader::CompiledPath(path.into())
                     }
                     x => x,
@@ -674,5 +670,32 @@ fn reinterpret_u16_to_f16(input: ndarray::ArrayD<u16>) -> ndarray::ArrayD<half::
     match ndarray::ArrayD::from_shape_vec(ndarray::IxDyn(&shape), raw_vec_f16) {
         Ok(array) => array,
         Err(err) => panic!("failed to rebuild f16 array from raw parts: {err}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use half::f16;
+    use ndarray::{Array, IxDyn};
+
+    #[test]
+    fn test_reinterpret_u16_to_f16() {
+        // Create an array with some specific u16 values
+        // For f16, the bit representation 0x3c00 represents 1.0
+        // 0x4000 represents 2.0
+        let values: Vec<u16> = vec![0x3c00, 0x4000, 0x0000];
+        let arr = Array::from_shape_vec(IxDyn(&[3]), values).unwrap();
+
+        // Reinterpret the bits
+        let reinterpreted = reinterpret_u16_to_f16(arr);
+
+        assert_eq!(reinterpreted.shape(), &[3]);
+
+        // Ensure values converted back equal what we expect
+        let expected_f16 = vec![f16::from_f32(1.0), f16::from_f32(2.0), f16::from_f32(0.0)];
+
+        let actual_vec = reinterpreted.into_raw_vec_and_offset().0;
+        assert_eq!(actual_vec, expected_f16);
     }
 }
