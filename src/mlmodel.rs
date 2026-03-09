@@ -1,16 +1,11 @@
 use crate::mlarray::MLArrayBaseExt;
 use crate::{
-    ffi::{modelWithAssets, modelWithPath, ComputePlatform, Model, ModelOutput},
+    ffi::{modelWithAssets, modelWithPath, Model, ModelOutput},
     mlarray::MLArray,
-    mlbatchmodel::CoreMLBatchModelWithState,
 };
-use flate2::Compression;
+
 use ndarray::Array;
-use std::{
-    collections::HashMap,
-    io::{Read, Write},
-    path::{Path, PathBuf},
-};
+use std::{collections::HashMap, io::Write, path::Path};
 use tempfile::NamedTempFile;
 
 pub use crate::swift::MLModelOutput;
