@@ -236,10 +236,12 @@ fn rust_vec_free_i32(ptr: *mut i32, len: usize) {
     unsafe { rust_vec_free(ptr, len) }
 }
 
+use crate::FeatureName;
+
 pub struct MLModelOutput {
-    pub outputs: HashMap<String, MLArray>,
+    pub outputs: HashMap<FeatureName, MLArray>,
 }
 
 pub struct MLBatchModelOutput {
-    pub outputs: Vec<HashMap<String, MLArray>>,
+    pub outputs: Vec<HashMap<FeatureName, MLArray>>,
 }

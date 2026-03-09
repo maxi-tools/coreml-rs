@@ -1,4 +1,5 @@
 use crate::mlarray::MLArrayBaseExt;
+use crate::FeatureName;
 use crate::{
     error::CoreMLError,
     ffi::{modelWithAssetsBatch, modelWithPathBatch, BatchModel},
@@ -7,13 +8,8 @@ use crate::{
     swift::MLBatchModelOutput,
     CoreMLModelOptions,
 };
-use flate2::Compression;
 use ndarray::Array;
-use std::{
-    collections::HashMap,
-    io::{Read, Write},
-    path::{Path, PathBuf},
-};
+use std::{collections::HashMap, io::Write, path::Path};
 use tempfile::NamedTempFile;
 
 pub use crate::swift::MLModelOutput;
@@ -91,7 +87,7 @@ impl CoreMLBatchModelWithState {
                 let loader = CoreMLModelLoader::Buffer(vec);
                 Ok(Self::Loaded(coreml_model, info, loader))
             }
-            CoreMLModelLoader::BufferToDisk(u) => match crate::utils::load_buffer_from_disk(&u) {
+            CoreMLModelLoader::BufferToDisk(u) => match crate::storage::load_buffer_from_disk(&u) {
                 Ok(vec) => {
                     let mut coreml_model = CoreMLBatchModel::load_buffer(vec, info.clone());
                     coreml_model.model.load();
@@ -140,8 +136,10 @@ impl CoreMLBatchModelWithState {
                 let loader = {
                     match loader {
                         CoreMLModelLoader::Buffer(vec) => {
-                            match crate::utils::save_buffer_to_disk(&vec, &mut info.opts.cache_dir)
-                            {
+                            match crate::storage::save_buffer_to_disk(
+                                &vec,
+                                &mut info.opts.cache_dir,
+                            ) {
                                 Ok(m) => CoreMLModelLoader::BufferToDisk(m),
                                 Err(err) => {
                                     return Err(CoreMLError::FailedToLoadBatch(
@@ -195,7 +193,7 @@ impl CoreMLBatchModelWithState {
 pub struct CoreMLBatchModel {
     model: BatchModel,
     // save_path: Option<PathBuf>,
-    outputs: HashMap<String, (&'static str, Vec<usize>)>,
+    outputs: HashMap<FeatureName, (&'static str, Vec<usize>)>,
 }
 
 unsafe impl Send for CoreMLBatchModel {}
@@ -286,27 +284,30 @@ impl CoreMLBatchModel {
             return Err(CoreMLError::UnknownError(err));
         }
         let n = output.count();
+        let mut all_outputs = Vec::with_capacity(n as usize);
+
+        for i in 0..n {
+            let output_at_idx = output.for_idx(i);
+            let mut batch_item_outputs = HashMap::new();
+
+            for (key, (ty, shape)) in &self.outputs {
+                if *ty != "f32" {
+                    eprintln!("warning: non-f32 types aren't supported, and will be skipped in the output");
+                    continue;
+                }
+
+                let name = key.clone();
+                let out = output_at_idx.outputF32(name);
+
+                if let Ok(array) = Array::from_shape_vec(shape.clone(), out) {
+                    batch_item_outputs.insert(key.clone(), array.into());
+                }
+            }
+            all_outputs.push(batch_item_outputs);
+        }
+
         Ok(MLBatchModelOutput {
-            outputs: (0..n).into_iter().map(|i|
-                    (i, self
-                        .outputs
-                        .clone()
-                        .into_iter())
-                )
-                .map(|(i, s)| {
-                    let output = output.for_idx(i);
-                    s.flat_map(|(key, (ty, shape))| {
-                        if ty != "f32" {
-                            eprintln!("warning: non-f32 types aren't supported, and will be skipped in the output");
-                            return None;
-                        }
-                        let name = key.clone();
-                        let out = output.outputF32(name);
-                        let array = Array::from_shape_vec(shape, out).ok()?;
-                        Some((key, array.into()))
-                    })
-                    .collect::<HashMap<String, MLArray>>()
-                }).collect()
+            outputs: all_outputs,
         })
     }
 

@@ -105,21 +105,58 @@ impl MLType for u32 {
     const TY: usize = TY_U32;
 }
 
-impl<T: MLType> From<ArrayBase<OwnedRepr<T>, Dim<IxDynImpl>>> for MLArray {
+// Helper trait to allow safely converting typed ArrayBase to MLArray variant
+pub trait IntoMLArray {
+    fn into_mlarray(self) -> MLArray;
+}
+
+impl IntoMLArray for ArrayBase<OwnedRepr<f32>, Dim<IxDynImpl>> {
+    fn into_mlarray(self) -> MLArray {
+        MLArray::Float32Array(self)
+    }
+}
+impl IntoMLArray for ArrayBase<OwnedRepr<half::f16>, Dim<IxDynImpl>> {
+    fn into_mlarray(self) -> MLArray {
+        MLArray::Float16Array(self)
+    }
+}
+impl IntoMLArray for ArrayBase<OwnedRepr<i32>, Dim<IxDynImpl>> {
+    fn into_mlarray(self) -> MLArray {
+        MLArray::Int32Array(self)
+    }
+}
+impl IntoMLArray for ArrayBase<OwnedRepr<u16>, Dim<IxDynImpl>> {
+    fn into_mlarray(self) -> MLArray {
+        MLArray::UInt16Array(self)
+    }
+}
+impl IntoMLArray for ArrayBase<OwnedRepr<u8>, Dim<IxDynImpl>> {
+    fn into_mlarray(self) -> MLArray {
+        MLArray::UInt8Array(self)
+    }
+}
+impl IntoMLArray for ArrayBase<OwnedRepr<i16>, Dim<IxDynImpl>> {
+    fn into_mlarray(self) -> MLArray {
+        MLArray::Int16Array(self)
+    }
+}
+impl IntoMLArray for ArrayBase<OwnedRepr<i8>, Dim<IxDynImpl>> {
+    fn into_mlarray(self) -> MLArray {
+        MLArray::Int8Array(self)
+    }
+}
+impl IntoMLArray for ArrayBase<OwnedRepr<u32>, Dim<IxDynImpl>> {
+    fn into_mlarray(self) -> MLArray {
+        MLArray::UInt32Array(self)
+    }
+}
+
+impl<T: MLType> From<ArrayBase<OwnedRepr<T>, Dim<IxDynImpl>>> for MLArray
+where
+    ArrayBase<OwnedRepr<T>, Dim<IxDynImpl>>: IntoMLArray,
+{
     fn from(value: ArrayBase<OwnedRepr<T>, Dim<IxDynImpl>>) -> Self {
-        unsafe {
-            match T::TY {
-                TY_F32 => MLArray::Float32Array(std::mem::transmute(value)),
-                TY_F16 => MLArray::Float16Array(std::mem::transmute(value)),
-                TY_I32 => MLArray::Int32Array(std::mem::transmute(value)),
-                TY_U16 => MLArray::UInt16Array(std::mem::transmute(value)),
-                TY_U8 => MLArray::UInt8Array(std::mem::transmute(value)),
-                TY_I16 => MLArray::Int16Array(std::mem::transmute(value)),
-                TY_I8 => MLArray::Int8Array(std::mem::transmute(value)),
-                TY_U32 => MLArray::UInt32Array(std::mem::transmute(value)),
-                _ => panic!("not supported"),
-            }
-        }
+        value.into_mlarray()
     }
 }
 
@@ -138,13 +175,24 @@ impl MLArray {
     }
 
     /// Extract the array as a typed tensor. Panics if type doesn't match the variant.
-    pub fn extract_to_tensor<T: MLType>(self) -> Array<T, Dim<IxDynImpl>> {
+    pub fn extract_to_tensor<T: MLType + 'static>(self) -> Array<T, Dim<IxDynImpl>> {
         self.try_extract_to_tensor()
             .unwrap_or_else(|e| panic!("{}", e))
     }
 
+    /// Helper to convert standard ArrayBase via Any.
+    fn downcast_any<A: 'static, T: 'static>(
+        a: Array<A, Dim<IxDynImpl>>,
+    ) -> Array<T, Dim<IxDynImpl>> {
+        // Since we checked actual == expected, T is A. Safe to use boxed Any downcast.
+        let boxed: Box<dyn std::any::Any> = Box::new(a);
+        *boxed.downcast::<Array<T, Dim<IxDynImpl>>>().unwrap()
+    }
+
     /// Try to extract as typed tensor. Returns Err if type doesn't match the variant.
-    pub fn try_extract_to_tensor<T: MLType>(self) -> Result<Array<T, Dim<IxDynImpl>>, String> {
+    pub fn try_extract_to_tensor<T: MLType + 'static>(
+        self,
+    ) -> Result<Array<T, Dim<IxDynImpl>>, String> {
         let actual = self.type_id();
         let expected = T::TY;
         if actual != expected {
@@ -153,18 +201,17 @@ impl MLArray {
                 actual, expected
             ));
         }
-        unsafe {
-            Ok(match self {
-                MLArray::Float32Array(a) => std::mem::transmute(a),
-                MLArray::Float16Array(a) => std::mem::transmute(a),
-                MLArray::Int32Array(a) => std::mem::transmute(a),
-                MLArray::Int16Array(a) => std::mem::transmute(a),
-                MLArray::Int8Array(a) => std::mem::transmute(a),
-                MLArray::UInt32Array(a) => std::mem::transmute(a),
-                MLArray::UInt16Array(a) => std::mem::transmute(a),
-                MLArray::UInt8Array(a) => std::mem::transmute(a),
-            })
-        }
+
+        Ok(match self {
+            MLArray::Float32Array(a) => Self::downcast_any(a),
+            MLArray::Float16Array(a) => Self::downcast_any(a),
+            MLArray::Int32Array(a) => Self::downcast_any(a),
+            MLArray::Int16Array(a) => Self::downcast_any(a),
+            MLArray::Int8Array(a) => Self::downcast_any(a),
+            MLArray::UInt32Array(a) => Self::downcast_any(a),
+            MLArray::UInt16Array(a) => Self::downcast_any(a),
+            MLArray::UInt8Array(a) => Self::downcast_any(a),
+        })
     }
 }
 
@@ -195,7 +242,9 @@ pub trait MLArrayBaseExt {
 }
 
 impl MLArray {
-    pub fn into_contiguous_raw_vec_and_shape<T: MLType>(self) -> (Vec<T>, Vec<i32>) {
+    pub fn into_contiguous_raw_vec_and_shape<T: MLType + Clone + 'static>(
+        self,
+    ) -> (Vec<T>, Vec<i32>) {
         let shape = self.shape().iter().map(|&i| i as i32).collect::<Vec<i32>>();
         let data = self.extract_to_tensor::<T>().into_contiguous_raw_vec();
         (data, shape)
@@ -204,94 +253,34 @@ impl MLArray {
 
 use ndarray::ArrayView;
 
-impl MLArray {
-    pub fn try_as_view_f32(&self) -> Result<ArrayView<f32, Dim<IxDynImpl>>, String> {
-        if let MLArray::Float32Array(a) = self {
-            Ok(a.view())
-        } else {
-            Err(format!(
-                "MLArray type mismatch: expected f32, found type_id={}",
-                self.type_id_str()
-            ))
+macro_rules! impl_try_as_view {
+    ($($fn_name:ident, $ty:ty, $variant:ident, $ty_str:expr);+ $(;)?) => {
+        impl MLArray {
+            $(
+                pub fn $fn_name(&self) -> Result<ArrayView<'_, $ty, Dim<IxDynImpl>>, String> {
+                    if let MLArray::$variant(a) = self {
+                        Ok(a.view())
+                    } else {
+                        Err(format!(
+                            concat!("MLArray type mismatch: expected ", $ty_str, ", found type_id={}"),
+                            self.type_id_str()
+                        ))
+                    }
+                }
+            )+
         }
-    }
+    };
+}
 
-    pub fn try_as_view_f16(&self) -> Result<ArrayView<f16, Dim<IxDynImpl>>, String> {
-        if let MLArray::Float16Array(a) = self {
-            Ok(a.view())
-        } else {
-            Err(format!(
-                "MLArray type mismatch: expected f16, found type_id={}",
-                self.type_id_str()
-            ))
-        }
-    }
-
-    pub fn try_as_view_i32(&self) -> Result<ArrayView<i32, Dim<IxDynImpl>>, String> {
-        if let MLArray::Int32Array(a) = self {
-            Ok(a.view())
-        } else {
-            Err(format!(
-                "MLArray type mismatch: expected i32, found type_id={}",
-                self.type_id_str()
-            ))
-        }
-    }
-
-    pub fn try_as_view_i16(&self) -> Result<ArrayView<i16, Dim<IxDynImpl>>, String> {
-        if let MLArray::Int16Array(a) = self {
-            Ok(a.view())
-        } else {
-            Err(format!(
-                "MLArray type mismatch: expected i16, found type_id={}",
-                self.type_id_str()
-            ))
-        }
-    }
-
-    pub fn try_as_view_i8(&self) -> Result<ArrayView<i8, Dim<IxDynImpl>>, String> {
-        if let MLArray::Int8Array(a) = self {
-            Ok(a.view())
-        } else {
-            Err(format!(
-                "MLArray type mismatch: expected i8, found type_id={}",
-                self.type_id_str()
-            ))
-        }
-    }
-
-    pub fn try_as_view_u32(&self) -> Result<ArrayView<u32, Dim<IxDynImpl>>, String> {
-        if let MLArray::UInt32Array(a) = self {
-            Ok(a.view())
-        } else {
-            Err(format!(
-                "MLArray type mismatch: expected u32, found type_id={}",
-                self.type_id_str()
-            ))
-        }
-    }
-
-    pub fn try_as_view_u16(&self) -> Result<ArrayView<u16, Dim<IxDynImpl>>, String> {
-        if let MLArray::UInt16Array(a) = self {
-            Ok(a.view())
-        } else {
-            Err(format!(
-                "MLArray type mismatch: expected u16, found type_id={}",
-                self.type_id_str()
-            ))
-        }
-    }
-
-    pub fn try_as_view_u8(&self) -> Result<ArrayView<u8, Dim<IxDynImpl>>, String> {
-        if let MLArray::UInt8Array(a) = self {
-            Ok(a.view())
-        } else {
-            Err(format!(
-                "MLArray type mismatch: expected u8, found type_id={}",
-                self.type_id_str()
-            ))
-        }
-    }
+impl_try_as_view! {
+    try_as_view_f32, f32, Float32Array, "f32";
+    try_as_view_f16, f16, Float16Array, "f16";
+    try_as_view_i32, i32, Int32Array, "i32";
+    try_as_view_i16, i16, Int16Array, "i16";
+    try_as_view_i8, i8, Int8Array, "i8";
+    try_as_view_u32, u32, UInt32Array, "u32";
+    try_as_view_u16, u16, UInt16Array, "u16";
+    try_as_view_u8, u8, UInt8Array, "u8";
 }
 
 impl MLArray {

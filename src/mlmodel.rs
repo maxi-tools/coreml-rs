@@ -1,16 +1,11 @@
 use crate::mlarray::MLArrayBaseExt;
+use crate::FeatureName;
 use crate::{
-    ffi::{modelWithAssets, modelWithPath, ComputePlatform, Model, ModelOutput},
+    ffi::{modelWithAssets, modelWithPath, Model, ModelOutput},
     mlarray::MLArray,
-    mlbatchmodel::CoreMLBatchModelWithState,
 };
-use flate2::Compression;
 use ndarray::Array;
-use std::{
-    collections::HashMap,
-    io::{Read, Write},
-    path::{Path, PathBuf},
-};
+use std::{collections::HashMap, io::Write, path::Path};
 use tempfile::NamedTempFile;
 
 pub use crate::swift::MLModelOutput;
@@ -95,7 +90,7 @@ impl CoreMLModelWithState {
                 let loader = CoreMLModelLoader::Buffer(vec);
                 Ok(Self::Loaded(coreml_model, info, loader))
             }
-            CoreMLModelLoader::BufferToDisk(u) => match crate::utils::load_buffer_from_disk(&u) {
+            CoreMLModelLoader::BufferToDisk(u) => match crate::storage::load_buffer_from_disk(&u) {
                 Ok(vec) => {
                     let mut coreml_model = CoreMLModel::load_buffer(vec, info.clone());
                     coreml_model.model.load();
@@ -142,8 +137,10 @@ impl CoreMLModelWithState {
                 let loader = {
                     match loader {
                         CoreMLModelLoader::Buffer(vec) => {
-                            match crate::utils::save_buffer_to_disk(&vec, &mut info.opts.cache_dir)
-                            {
+                            match crate::storage::save_buffer_to_disk(
+                                &vec,
+                                &mut info.opts.cache_dir,
+                            ) {
                                 Ok(m) => CoreMLModelLoader::BufferToDisk(m),
                                 Err(err) => {
                                     return Err(CoreMLError::FailedToLoad(
@@ -204,8 +201,28 @@ impl CoreMLModelWithState {
         }
     }
 
+    /// Get the compiled model path (if available after loading from .mlpackage).
+    pub fn compiled_path(&self) -> Option<String> {
+        match self {
+            CoreMLModelWithState::Loaded(core_mlmodel, _, _) => core_mlmodel.model.compiled_path(),
+            _ => None,
+        }
+    }
+}
+
+pub trait StatefulModel {
     /// Initialize CoreML State for stateful models (macOS 15+).
-    pub fn make_state(&mut self) -> Result<(), CoreMLError> {
+    fn make_state(&mut self) -> Result<(), CoreMLError>;
+    /// Run prediction using CoreML State.
+    fn predict_with_state(&mut self) -> Result<MLModelOutput, CoreMLError>;
+    /// Check if this model has an active CoreML State.
+    fn has_state(&self) -> bool;
+    /// Reset CoreML State.
+    fn reset_state(&mut self);
+}
+
+impl StatefulModel for CoreMLModelWithState {
+    fn make_state(&mut self) -> Result<(), CoreMLError> {
         match self {
             CoreMLModelWithState::Unloaded(_, _) => Err(CoreMLError::ModelNotLoaded),
             CoreMLModelWithState::Loaded(core_mlmodel, _, _) => {
@@ -220,44 +237,39 @@ impl CoreMLModelWithState {
         }
     }
 
-    /// Run prediction using CoreML State.
-    pub fn predict_with_state(&mut self) -> Result<MLModelOutput, CoreMLError> {
+    fn predict_with_state(&mut self) -> Result<MLModelOutput, CoreMLError> {
         match self {
             CoreMLModelWithState::Unloaded(_, _) => Err(CoreMLError::ModelNotLoaded),
             CoreMLModelWithState::Loaded(core_mlmodel, _, _) => core_mlmodel.predict_with_state(),
         }
     }
 
-    /// Check if this model has an active CoreML State.
-    pub fn has_state(&self) -> bool {
+    fn has_state(&self) -> bool {
         match self {
             CoreMLModelWithState::Unloaded(_, _) => false,
             CoreMLModelWithState::Loaded(core_mlmodel, _, _) => core_mlmodel.has_state(),
         }
     }
 
-    /// Reset CoreML State.
-    pub fn reset_state(&mut self) {
+    fn reset_state(&mut self) {
         if let CoreMLModelWithState::Loaded(core_mlmodel, _, _) = self {
             core_mlmodel.reset_state();
-        }
-    }
-
-    /// Get the compiled model path (if available after loading from .mlpackage).
-    pub fn compiled_path(&self) -> Option<String> {
-        match self {
-            CoreMLModelWithState::Loaded(core_mlmodel, _, _) => core_mlmodel.model.compiled_path(),
-            _ => None,
         }
     }
 }
 
 pub use crate::loader::CoreMLModelInfo;
 
+/// Information required to extract flexible outputs from the model.
+pub struct OutputBackingInfo {
+    pub use_output_backing: bool,
+    pub flexible_outputs: Vec<(FeatureName, Vec<usize>, String)>,
+}
+
 #[derive(Debug)]
 pub struct CoreMLModel {
     model: Model,
-    outputs: HashMap<String, (&'static str, Vec<usize>)>,
+    outputs: HashMap<FeatureName, (&'static str, Vec<usize>)>,
 }
 
 unsafe impl Send for CoreMLModel {}
@@ -453,10 +465,7 @@ impl CoreMLModel {
     /// Shared output setup: inspect model description, bind output buffers.
     /// `allow_empty_shape` controls whether empty shapes also disable output backing
     /// (needed for stateful models where shapes may be unknown until runtime).
-    fn setup_outputs(
-        &mut self,
-        allow_empty_shape: bool,
-    ) -> Result<(bool, Vec<(String, Vec<usize>, String)>), CoreMLError> {
+    fn setup_outputs(&mut self, allow_empty_shape: bool) -> Result<OutputBackingInfo, CoreMLError> {
         let desc = self.model.description();
         let mut use_output_backing = true;
         let mut output_info = Vec::new();
@@ -508,16 +517,19 @@ impl CoreMLModel {
                 }
             }
         }
-        Ok((use_output_backing, output_info))
+        Ok(OutputBackingInfo {
+            use_output_backing,
+            flexible_outputs: output_info,
+        })
     }
 
     /// Extract flexible outputs from a CoreML prediction result.
     fn extract_flexible_outputs(
-        output_info: Vec<(String, Vec<usize>, String)>,
+        backing_info: OutputBackingInfo,
         output: &ModelOutput,
-    ) -> HashMap<String, MLArray> {
+    ) -> HashMap<FeatureName, MLArray> {
         let mut outputs = HashMap::new();
-        for (name, _output_shape, ty) in output_info {
+        for (name, _output_shape, ty) in backing_info.flexible_outputs {
             let actual_shape: Vec<usize> = output.outputShape(name.clone()).into_iter().collect();
             if actual_shape.is_empty() {
                 eprintln!("warning: output '{}' has no shape data", name);
@@ -564,7 +576,7 @@ impl CoreMLModel {
     }
 
     /// Collect fixed-size outputs from pre-allocated buffers.
-    fn collect_fixed_outputs(&self, output: &ModelOutput) -> HashMap<String, MLArray> {
+    fn collect_fixed_outputs(&self, output: &ModelOutput) -> HashMap<FeatureName, MLArray> {
         self.outputs
             .clone()
             .into_iter()
@@ -596,13 +608,13 @@ impl CoreMLModel {
     }
 
     pub fn predict(&mut self) -> Result<MLModelOutput, CoreMLError> {
-        let (use_output_backing, output_info) = self.setup_outputs(false)?;
+        let backing_info = self.setup_outputs(false)?;
         let output = self.model.predict();
         if let Some(err) = output.getError() {
             return Err(CoreMLError::UnknownError(err));
         }
-        let outputs = if !use_output_backing {
-            Self::extract_flexible_outputs(output_info, &output)
+        let outputs = if !backing_info.use_output_backing {
+            Self::extract_flexible_outputs(backing_info, &output)
         } else {
             self.collect_fixed_outputs(&output)
         };
@@ -625,13 +637,13 @@ impl CoreMLModel {
 
     /// Run prediction using CoreML State (KV cache managed in-place by CoreML).
     pub fn predict_with_state(&mut self) -> Result<MLModelOutput, CoreMLError> {
-        let (use_output_backing, output_info) = self.setup_outputs(true)?;
+        let backing_info = self.setup_outputs(true)?;
         let output = self.model.predictWithState();
         if let Some(err) = output.getError() {
             return Err(CoreMLError::UnknownError(err));
         }
-        let outputs = if !use_output_backing {
-            Self::extract_flexible_outputs(output_info, &output)
+        let outputs = if !backing_info.use_output_backing {
+            Self::extract_flexible_outputs(backing_info, &output)
         } else {
             self.collect_fixed_outputs(&output)
         };
