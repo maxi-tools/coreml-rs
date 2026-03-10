@@ -8,11 +8,7 @@ use crate::{
     CoreMLModelOptions,
 };
 use ndarray::Array;
-use std::{
-    collections::HashMap,
-    io::Write,
-    path::Path,
-};
+use std::{collections::HashMap, io::Write, path::Path};
 use tempfile::NamedTempFile;
 
 pub use crate::swift::MLModelOutput;
