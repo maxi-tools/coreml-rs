@@ -1,15 +1,13 @@
 use crate::mlarray::MLArrayBaseExt;
 use crate::{
-    ffi::{modelWithAssets, modelWithPath, ComputePlatform, Model, ModelOutput},
+    ffi::{modelWithAssets, modelWithPath, Model, ModelOutput},
     mlarray::MLArray,
-    mlbatchmodel::CoreMLBatchModelWithState,
 };
-use flate2::Compression;
 use ndarray::Array;
 use std::{
     collections::HashMap,
-    io::{Read, Write},
-    path::{Path, PathBuf},
+    io::Write,
+    path::Path,
 };
 use tempfile::NamedTempFile;
 
@@ -122,9 +120,14 @@ impl CoreMLModelWithState {
                         let res = std::fs::read(temp_file.path()).map_err(CoreMLError::IoError)?;
                         CoreMLModelLoader::Buffer(res)
                     }
-                    CoreMLModelLoader::ModelPath(_) => {
+                    CoreMLModelLoader::ModelPath(p) => {
                         // if the model is loaded from modelPath it has to have compiled path
-                        let path = model.model.compiled_path().unwrap();
+                        let path = model.model.compiled_path().ok_or_else(|| {
+                            CoreMLError::UnknownError(format!(
+                                "Compiled path missing for model loaded from {:?}",
+                                p
+                            ))
+                        })?;
                         CoreMLModelLoader::CompiledPath(path.into())
                     }
                     x => x,

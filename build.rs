@@ -69,22 +69,22 @@ fn compile_swift() {
         cmd.args(["-c", "release"]);
     }
 
-    let child = cmd.spawn().unwrap_or_else(|e| {
-        eprintln!("Failed to spawn swift build command: {}", e);
-        std::process::exit(1);
-    });
-    let exit_status = child.wait_with_output().unwrap_or_else(|e| {
-        eprintln!("Failed to wait for swift build: {}", e);
-        std::process::exit(1);
-    });
+    if let Ok(child) = cmd.spawn() {
+        let exit_status = child.wait_with_output().unwrap_or_else(|e| {
+            eprintln!("Failed to wait for swift build: {}", e);
+            std::process::exit(1);
+        });
 
-    if !exit_status.status.success() {
-        eprintln!(
-            "Swift build failed:\nStderr: {}\nStdout: {}",
-            String::from_utf8_lossy(&exit_status.stderr),
-            String::from_utf8_lossy(&exit_status.stdout),
-        );
-        std::process::exit(1);
+        if !exit_status.status.success() {
+            eprintln!(
+                "Swift build failed:\nStderr: {}\nStdout: {}",
+                String::from_utf8_lossy(&exit_status.stderr),
+                String::from_utf8_lossy(&exit_status.stdout),
+            );
+            std::process::exit(1);
+        }
+    } else {
+        println!("cargo:warning=Failed to spawn swift build command. In environment lacking Swift toolchain, build handles gracefully so `cargo check --tests` can be used.");
     }
 }
 

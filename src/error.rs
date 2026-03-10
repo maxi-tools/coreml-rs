@@ -24,3 +24,20 @@ pub enum CoreMLError {
     #[error("FailedToLoadBatch: coreml model couldn't be loaded: {0}")]
     FailedToLoadBatch(String, CoreMLBatchModelWithState),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_formatting() {
+        let err = CoreMLError::BadInputShape("wrong size".to_string());
+        assert_eq!(format!("{}", err), "BadInputShape: wrong size");
+
+        let err2 = CoreMLError::ModelNotLoaded;
+        assert_eq!(
+            format!("{}", err2),
+            "ModelNotLoaded: coreml model not loaded into session"
+        );
+    }
+}

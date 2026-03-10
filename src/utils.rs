@@ -44,11 +44,9 @@ pub fn save_buffer_to_disk(vec: &[u8], cache_dir: &mut PathBuf) -> Result<PathBu
         cache_dir.join("model_cache")
     };
 
-    std::fs::File::create(&m)
-        .and_then(|file| {
-            flate2::write::ZlibEncoder::new(file, Compression::best())
-                .write_all(vec)
-        })?;
+    std::fs::File::create(&m).and_then(|file| {
+        flate2::write::ZlibEncoder::new(file, Compression::best()).write_all(vec)
+    })?;
 
     Ok(m)
 }
@@ -58,4 +56,47 @@ pub fn load_buffer_from_disk(path: &Path) -> Result<Vec<u8>, CoreMLError> {
     let mut vec = vec![];
     std::io::Read::read_to_end(&mut flate2::read::ZlibDecoder::new(file), &mut vec)?;
     Ok(vec)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_coreml_shape_exact_match() {
+        let expected = [1, 3, 224, 224];
+        let actual = [1, 3, 224, 224];
+        assert!(validate_coreml_shape(&expected, &actual, "image").is_ok());
+    }
+
+    #[test]
+    fn test_validate_coreml_shape_flexible_match() {
+        let expected = [1, 3, 0, 0];
+        let actual = [1, 3, 224, 224];
+        assert!(validate_coreml_shape(&expected, &actual, "image").is_ok());
+    }
+
+    #[test]
+    fn test_validate_coreml_shape_unexpected_feature() {
+        let expected: [usize; 0] = [];
+        let actual = [1, 3, 224, 224];
+        let res = validate_coreml_shape(&expected, &actual, "image");
+        assert!(matches!(res, Err(CoreMLError::BadInputShape(_))));
+    }
+
+    #[test]
+    fn test_validate_coreml_shape_length_mismatch() {
+        let expected = [1, 3, 224];
+        let actual = [1, 3, 224, 224];
+        let res = validate_coreml_shape(&expected, &actual, "image");
+        assert!(matches!(res, Err(CoreMLError::BadInputShape(_))));
+    }
+
+    #[test]
+    fn test_validate_coreml_shape_dimension_mismatch() {
+        let expected = [1, 3, 224, 224];
+        let actual = [1, 3, 256, 256];
+        let res = validate_coreml_shape(&expected, &actual, "image");
+        assert!(matches!(res, Err(CoreMLError::BadInputShape(_))));
+    }
 }

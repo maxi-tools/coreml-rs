@@ -2,7 +2,7 @@
 //! Regression tests for MLArray type conversions and contiguity handling.
 //! These tests don't require a CoreML model file.
 
-use coreml_rs::mlarray::{mean_absolute_error, MLArray};
+use coreml_rs::mlarray::{mean_absolute_error, mean_absolute_error_bytes, MLArray};
 use ndarray::{Array, Array2, IxDyn};
 
 #[test]
@@ -94,6 +94,16 @@ fn mean_absolute_error_identical() {
 }
 
 #[test]
+fn mean_absolute_error_bytes_test() {
+    let a = [1.0f32, 2.0, 3.0];
+    let b = [1.5f32, 2.5, 3.5];
+    let a_bytes: &[u8] = bytemuck::cast_slice(&a);
+    let b_bytes: &[u8] = bytemuck::cast_slice(&b);
+    let mae = mean_absolute_error_bytes::<f32>(a_bytes, b_bytes);
+    assert!((mae - 0.5).abs() < 1e-6);
+}
+
+#[test]
 fn transposed_f32_is_standard_layout() {
     // Create a non-contiguous array (transposed)
     let arr: Array2<f32> =
@@ -106,4 +116,43 @@ fn transposed_f32_is_standard_layout() {
     assert_eq!(contiguous[[0, 0]], 1.0);
     assert_eq!(contiguous[[0, 1]], 4.0);
     assert_eq!(contiguous[[1, 0]], 2.0);
+}
+
+#[test]
+fn test_try_as_view_success_and_failure() {
+    let arr = Array::from_shape_vec(IxDyn(&[2]), vec![1.0f32, 2.0]).unwrap();
+    let ml: MLArray = arr.clone().into();
+
+    // Success on exact match
+    let view = ml.try_as_view_f32().unwrap();
+    assert_eq!(view, arr);
+
+    // Failure on mismatch
+    let err = ml.try_as_view_i32().unwrap_err();
+    assert_eq!(
+        err,
+        "MLArray type mismatch: expected i32, found type_id=f32"
+    );
+}
+
+#[test]
+fn test_try_extract_to_tensor_failure() {
+    let arr = Array::from_shape_vec(IxDyn(&[2]), vec![10i32, 20]).unwrap();
+    let ml: MLArray = arr.into();
+
+    let res: Result<Array<f32, _>, _> = ml.try_extract_to_tensor();
+    assert!(res.is_err());
+    let err = res.unwrap_err();
+    assert!(err.contains("MLArray type mismatch"));
+}
+
+#[test]
+fn test_type_id_str() {
+    let arr = Array::from_shape_vec(IxDyn(&[1]), vec![10i32]).unwrap();
+    let ml: MLArray = arr.into();
+    assert_eq!(ml.type_id_str(), "i32");
+
+    let arr2 = Array::from_shape_vec(IxDyn(&[1]), vec![1.0f32]).unwrap();
+    let ml2: MLArray = arr2.into();
+    assert_eq!(ml2.type_id_str(), "f32");
 }

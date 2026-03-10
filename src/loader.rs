@@ -54,3 +54,18 @@ impl CoreMLModelOptions {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_coreml_model_options_builder() {
+        let opts = CoreMLModelOptions::new()
+            .with_compute_platform(ComputePlatform::CpuAndANE)
+            .with_cache_dir("/tmp/cache");
+
+        assert!(matches!(opts.compute_platform, ComputePlatform::CpuAndANE));
+        assert_eq!(opts.cache_dir, PathBuf::from("/tmp/cache"));
+    }
+}
