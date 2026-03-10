@@ -273,7 +273,11 @@ impl CoreMLBatchModel {
         let name = tag.as_ref().to_string();
         let shape: Vec<usize> = input.shape().to_vec();
 
-        let arr = self.input_shapes.get(&name).map(|v| v.as_slice()).unwrap_or(&[]);
+        let arr = self
+            .input_shapes
+            .get(&name)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
         crate::utils::validate_coreml_shape(arr, &shape, &name)?;
         match input {
             MLArray::Float32Array(array_base) => {
