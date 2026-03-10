@@ -195,7 +195,7 @@ pub trait MLArrayBaseExt {
 }
 
 impl MLArray {
-    pub fn into_contiguous_raw_vec_and_shape<T: MLType>(self) -> (Vec<T>, Vec<i32>) {
+    pub fn into_contiguous_raw_vec_and_shape<T: MLType + Clone>(self) -> (Vec<T>, Vec<i32>) {
         let shape = self.shape().iter().map(|&i| i as i32).collect::<Vec<i32>>();
         let data = self.extract_to_tensor::<T>().into_contiguous_raw_vec();
         (data, shape)
@@ -205,7 +205,7 @@ impl MLArray {
 use ndarray::ArrayView;
 
 impl MLArray {
-    pub fn try_as_view_f32(&self) -> Result<ArrayView<f32, Dim<IxDynImpl>>, String> {
+    pub fn try_as_view_f32(&self) -> Result<ArrayView<'_, f32, Dim<IxDynImpl>>, String> {
         if let MLArray::Float32Array(a) = self {
             Ok(a.view())
         } else {
@@ -216,7 +216,7 @@ impl MLArray {
         }
     }
 
-    pub fn try_as_view_f16(&self) -> Result<ArrayView<f16, Dim<IxDynImpl>>, String> {
+    pub fn try_as_view_f16(&self) -> Result<ArrayView<'_, f16, Dim<IxDynImpl>>, String> {
         if let MLArray::Float16Array(a) = self {
             Ok(a.view())
         } else {
@@ -227,7 +227,7 @@ impl MLArray {
         }
     }
 
-    pub fn try_as_view_i32(&self) -> Result<ArrayView<i32, Dim<IxDynImpl>>, String> {
+    pub fn try_as_view_i32(&self) -> Result<ArrayView<'_, i32, Dim<IxDynImpl>>, String> {
         if let MLArray::Int32Array(a) = self {
             Ok(a.view())
         } else {
@@ -238,7 +238,7 @@ impl MLArray {
         }
     }
 
-    pub fn try_as_view_i16(&self) -> Result<ArrayView<i16, Dim<IxDynImpl>>, String> {
+    pub fn try_as_view_i16(&self) -> Result<ArrayView<'_, i16, Dim<IxDynImpl>>, String> {
         if let MLArray::Int16Array(a) = self {
             Ok(a.view())
         } else {
@@ -249,7 +249,7 @@ impl MLArray {
         }
     }
 
-    pub fn try_as_view_i8(&self) -> Result<ArrayView<i8, Dim<IxDynImpl>>, String> {
+    pub fn try_as_view_i8(&self) -> Result<ArrayView<'_, i8, Dim<IxDynImpl>>, String> {
         if let MLArray::Int8Array(a) = self {
             Ok(a.view())
         } else {
@@ -260,7 +260,7 @@ impl MLArray {
         }
     }
 
-    pub fn try_as_view_u32(&self) -> Result<ArrayView<u32, Dim<IxDynImpl>>, String> {
+    pub fn try_as_view_u32(&self) -> Result<ArrayView<'_, u32, Dim<IxDynImpl>>, String> {
         if let MLArray::UInt32Array(a) = self {
             Ok(a.view())
         } else {
@@ -271,7 +271,7 @@ impl MLArray {
         }
     }
 
-    pub fn try_as_view_u16(&self) -> Result<ArrayView<u16, Dim<IxDynImpl>>, String> {
+    pub fn try_as_view_u16(&self) -> Result<ArrayView<'_, u16, Dim<IxDynImpl>>, String> {
         if let MLArray::UInt16Array(a) = self {
             Ok(a.view())
         } else {
@@ -282,7 +282,7 @@ impl MLArray {
         }
     }
 
-    pub fn try_as_view_u8(&self) -> Result<ArrayView<u8, Dim<IxDynImpl>>, String> {
+    pub fn try_as_view_u8(&self) -> Result<ArrayView<'_, u8, Dim<IxDynImpl>>, String> {
         if let MLArray::UInt8Array(a) = self {
             Ok(a.view())
         } else {
