@@ -7,13 +7,19 @@ pub fn save_buffer_to_disk(vec: &[u8], cache_dir: &mut PathBuf) -> Result<PathBu
     if cache_dir.as_os_str().is_empty() {
         *cache_dir = PathBuf::from(".");
     }
-    if !cache_dir.exists() {
-        std::fs::create_dir_all(&cache_dir)?;
-    }
-    // pick the file specified, if it's a folder/dir append model_cache
-    let m = if !cache_dir.is_dir() {
+    // Determine target path before creating directories: if path has an extension,
+    // treat it as a file path (create parent dir); otherwise treat as directory.
+    let m = if cache_dir.extension().is_some() {
+        if let Some(parent) = cache_dir.parent() {
+            if !parent.exists() {
+                std::fs::create_dir_all(parent)?;
+            }
+        }
         cache_dir.clone()
     } else {
+        if !cache_dir.exists() {
+            std::fs::create_dir_all(&cache_dir)?;
+        }
         cache_dir.join("model_cache")
     };
 

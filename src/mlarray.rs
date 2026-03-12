@@ -106,7 +106,7 @@ impl MLType for u32 {
 }
 
 // Helper trait to allow safely converting typed ArrayBase to MLArray variant
-pub trait IntoMLArray {
+pub(crate) trait IntoMLArray {
     fn into_mlarray(self) -> MLArray;
 }
 
