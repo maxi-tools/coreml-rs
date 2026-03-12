@@ -97,12 +97,6 @@ impl CoreMLModelWithState {
                 Ok(vec) => {
                     let mut coreml_model = CoreMLModel::load_buffer(vec, info.clone());
                     coreml_model.model.load();
-                    if coreml_model.model.failed() {
-                        return Err(CoreMLError::FailedToLoadStatic(
-                            "Failed to load model from cached buffer",
-                            Self::Unloaded(info, CoreMLModelLoader::BufferToDisk(u)),
-                        ));
-                    }
                     coreml_model.init_caches();
                     let loader = CoreMLModelLoader::BufferToDisk(u);
                     Ok(Self::Loaded(coreml_model, info, loader))
@@ -518,24 +512,16 @@ impl CoreMLModel {
                     };
                     match ty.as_str() {
                         "f32" => {
-                            if !self.add_output_f32(&name, Array::<f32, _>::zeros(output_shape)) {
-                                eprintln!("warning: failed to bind output '{}'", name);
-                            }
+                            self.add_output_f32(name, Array::<f32, _>::zeros(output_shape));
                         }
                         "f16" | "float16" => {
-                            if !self.add_output_u16(&name, Array::<u16, _>::zeros(output_shape)) {
-                                eprintln!("warning: failed to bind output '{}'", name);
-                            }
+                            self.add_output_u16(name, Array::<u16, _>::zeros(output_shape));
                         }
                         "int32" | "int64" | "int16" | "uint32" | "uint64" | "uint16" => {
-                            if !self.add_output_i32(&name, Array::<i32, _>::zeros(output_shape)) {
-                                eprintln!("warning: failed to bind output '{}'", name);
-                            }
+                            self.add_output_i32(name, Array::<i32, _>::zeros(output_shape));
                         }
                         "bool" | "boolean" => {
-                            if !self.add_output_f32(&name, Array::<f32, _>::zeros(output_shape)) {
-                                eprintln!("warning: failed to bind output '{}'", name);
-                            }
+                            self.add_output_f32(name, Array::<f32, _>::zeros(output_shape));
                         }
                         _ => {
                             return Err(CoreMLError::UnknownErrorStatic(
