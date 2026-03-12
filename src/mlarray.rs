@@ -184,16 +184,12 @@ impl MLArray {
     fn downcast_any<A: 'static, T: 'static>(
         a: Array<A, Dim<IxDynImpl>>,
     ) -> Result<Array<T, Dim<IxDynImpl>>, String> {
+        // Since we checked actual == expected, T is A. Safe to use boxed Any downcast.
         let boxed: Box<dyn std::any::Any> = Box::new(a);
         boxed
             .downcast::<Array<T, Dim<IxDynImpl>>>()
             .map(|b| *b)
-            .map_err(|_| {
-                format!(
-                    "Internal downcast failed: expected {}, got different type",
-                    std::any::type_name::<T>()
-                )
-            })
+            .map_err(|_| "Failed to downcast Any to Array".to_string())
     }
 
     /// Try to extract as typed tensor. Returns Err if type doesn't match the variant.

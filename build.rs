@@ -86,11 +86,15 @@ fn compile_swift() {
                 std::process::exit(1);
             }
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            println!("cargo:warning=Swift compiler not found, skipping build.");
-        }
         Err(e) => {
-            panic!("Failed to spawn swift build command: {}", e);
+            // Only ignore if swift is genuinely unavailable (cargo check --tests mode)
+            if Command::new("swift").arg("--version").output().is_ok() {
+                panic!("Failed to spawn swift build command: {}", e);
+            }
+            println!(
+                "cargo:warning=Swift compiler not available, skipping build: {}",
+                e
+            );
         }
     }
 }

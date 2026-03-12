@@ -25,10 +25,12 @@ pub fn save_buffer_to_disk(vec: &[u8], cache_dir: &mut PathBuf) -> Result<PathBu
         cache_dir.clone()
     };
 
-    let file = std::fs::File::create(&m)?;
-    let mut encoder = flate2::write::ZlibEncoder::new(file, Compression::best());
-    encoder.write_all(vec)?;
-    encoder.finish()?;
+    std::fs::File::create(&m).and_then(|file| {
+        let mut encoder = flate2::write::ZlibEncoder::new(file, Compression::best());
+        encoder.write_all(vec)?;
+        encoder.finish()?;
+        Ok(())
+    })?;
 
     Ok(m)
 }
