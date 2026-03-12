@@ -35,9 +35,7 @@ fn main() {
             .output()
         {
             if output.status.success() {
-                String::from_utf8_lossy(&output.stdout)
-                    .trim()
-                    .to_string()
+                String::from_utf8_lossy(&output.stdout).trim().to_string()
             } else {
                 "/Applications/Xcode.app/Contents/Developer".to_string()
             }
