@@ -97,12 +97,6 @@ impl CoreMLModelWithState {
                 Ok(vec) => {
                     let mut coreml_model = CoreMLModel::load_buffer(vec, info.clone());
                     coreml_model.model.load();
-                    if coreml_model.model.failed() {
-                        return Err(CoreMLError::FailedToLoadStatic(
-                            "Failed to load model from cached buffer",
-                            Self::Unloaded(info, CoreMLModelLoader::BufferToDisk(u)),
-                        ));
-                    }
                     coreml_model.init_caches();
                     let loader = CoreMLModelLoader::BufferToDisk(u);
                     Ok(Self::Loaded(coreml_model, info, loader))
