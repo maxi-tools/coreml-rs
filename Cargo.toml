@@ -88,11 +88,11 @@ version = "3.0"
 [dependencies.thiserror]
 version = "2.0.12"
 
+[dependencies.sha2]
+version = "0.10.9"
+
 [dev-dependencies.libproc]
 version = "0.14.4"
-
-[dev-dependencies.sha2]
-version = "0.10.9"
 
 [dev-dependencies.zip]
 version = "6.0.0"
