@@ -6,17 +6,45 @@ fn main() {
         .write_all_concatenated(swift_bridge_out_dir(), "rust-calls-swift");
 
     // Skip Swift compilation if 'swift' command is not found
-    if Command::new("swift").arg("--version").output().is_ok() {
+    let swift_available = Command::new("swift").arg("--version").output().is_ok();
+    if swift_available {
         compile_swift();
     } else {
         println!("cargo:warning=Swift compiler not found. Skipping Swift compilation. Use this mode ONLY for `cargo check --tests`.");
     }
 
-    println!("cargo:rustc-link-lib=static=swift-library");
-    println!(
-        "cargo:rustc-link-search={}",
-        swift_library_static_lib_dir().to_str().unwrap()
-    );
+    if swift_available {
+        println!("cargo:rustc-link-lib=static=swift-library");
+        println!(
+            "cargo:rustc-link-search={}",
+            swift_library_static_lib_dir().to_str().unwrap()
+        );
+
+        // Without this we will get warnings about not being able to find dynamic libraries, and then
+        // we won't be able to compile since the Swift static libraries depend on them:
+        // For example:
+        // ld: warning: Could not find or use auto-linked library 'swiftCompatibility51'
+        // ld: warning: Could not find or use auto-linked library 'swiftCompatibility50'
+        // ld: warning: Could not find or use auto-linked library 'swiftCompatibilityConcurrency'
+        let xcode_path =
+            if let Ok(output) = Command::new("xcode-select").args(["--print-path"]).output() {
+                String::from_utf8(output.stdout)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string()
+            } else {
+                "/Applications/Xcode.app/Contents/Developer".to_string()
+            };
+        println!(
+            "cargo:rustc-link-search=native={}/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx",
+            xcode_path
+        );
+        println!(
+            "cargo:rustc-link-search=native={}/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift_static/macosx",
+            xcode_path
+        );
+        println!("cargo:rustc-link-search=native=/usr/lib/swift");
+    }
 }
 
 fn compile_swift() {
@@ -44,9 +72,18 @@ fn compile_swift() {
         cmd.args(["-c", "release"]);
     }
 
-    let child = cmd.spawn().unwrap();
-    let exit_status = child.wait_with_output().unwrap();
+    let child = cmd.spawn().unwrap_or_else(|e| {
+        panic!("Failed to start swift build: {}", e);
+    });
+    let exit_status = child.wait_with_output().unwrap_or_else(|e| {
+        panic!("Failed to wait for swift build: {}", e);
+    });
     if !exit_status.status.success() {
+        eprintln!(
+            "Swift build failed:\nstderr: {}\nstdout: {}",
+            String::from_utf8_lossy(&exit_status.stderr),
+            String::from_utf8_lossy(&exit_status.stdout),
+        );
         std::process::exit(1);
     }
 }

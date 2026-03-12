@@ -97,6 +97,12 @@ impl CoreMLModelWithState {
                 Ok(vec) => {
                     let mut coreml_model = CoreMLModel::load_buffer(vec, info.clone());
                     coreml_model.model.load();
+                    if coreml_model.model.failed() {
+                        return Err(CoreMLError::FailedToLoadStatic(
+                            "Failed to load model from cached buffer",
+                            Self::Unloaded(info, CoreMLModelLoader::BufferToDisk(u)),
+                        ));
+                    }
                     coreml_model.init_caches();
                     let loader = CoreMLModelLoader::BufferToDisk(u);
                     Ok(Self::Loaded(coreml_model, info, loader))
@@ -490,10 +496,7 @@ impl CoreMLModel {
     /// Shared output setup: inspect model description, bind output buffers.
     /// `allow_empty_shape` controls whether empty shapes also disable output backing
     /// (needed for stateful models where shapes may be unknown until runtime).
-    fn setup_outputs(
-        &mut self,
-        allow_empty_shape: bool,
-    ) -> Result<(bool, Vec<(String, Vec<usize>, String)>), CoreMLError> {
+    fn setup_outputs(&mut self, allow_empty_shape: bool) -> Result<bool, CoreMLError> {
         let cached_use_backing = if allow_empty_shape {
             self.use_output_backing_with_state
         } else {
@@ -531,7 +534,7 @@ impl CoreMLModel {
                     }
                 }
             }
-            return Ok((use_backing, self.output_info.clone()));
+            return Ok(use_backing);
         }
 
         let mut use_output_backing = true;
@@ -577,7 +580,7 @@ impl CoreMLModel {
                 }
             }
         }
-        Ok((use_output_backing, self.output_info.clone()))
+        Ok(use_output_backing)
     }
 
     /// Extract flexible outputs from a CoreML prediction result.
@@ -665,13 +668,13 @@ impl CoreMLModel {
     }
 
     pub fn predict(&mut self) -> Result<MLModelOutput, CoreMLError> {
-        let (use_output_backing, output_info) = self.setup_outputs(false)?;
+        let use_output_backing = self.setup_outputs(false)?;
         let output = self.model.predict();
         if let Some(err) = output.getError() {
             return Err(CoreMLError::UnknownError(err));
         }
         let outputs = if !use_output_backing {
-            Self::extract_flexible_outputs(output_info, &output)
+            Self::extract_flexible_outputs(self.output_info.clone(), &output)
         } else {
             self.collect_fixed_outputs(&output)
         };
@@ -694,13 +697,13 @@ impl CoreMLModel {
 
     /// Run prediction using CoreML State (KV cache managed in-place by CoreML).
     pub fn predict_with_state(&mut self) -> Result<MLModelOutput, CoreMLError> {
-        let (use_output_backing, output_info) = self.setup_outputs(true)?;
+        let use_output_backing = self.setup_outputs(true)?;
         let output = self.model.predictWithState();
         if let Some(err) = output.getError() {
             return Err(CoreMLError::UnknownError(err));
         }
         let outputs = if !use_output_backing {
-            Self::extract_flexible_outputs(output_info, &output)
+            Self::extract_flexible_outputs(self.output_info.clone(), &output)
         } else {
             self.collect_fixed_outputs(&output)
         };

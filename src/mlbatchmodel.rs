@@ -57,6 +57,7 @@ impl CoreMLBatchModelWithState {
                         Self::Unloaded(info, loader),
                     ));
                 }
+                coreml_model.init_caches();
                 Ok(Self::Loaded(coreml_model, info, loader))
             }
             CoreMLModelLoader::CompiledPath(path_buf) => {
@@ -324,11 +325,7 @@ impl CoreMLBatchModel {
             let single_output = output.for_idx(i);
             let mut map = HashMap::with_capacity(self.outputs.len());
 
-            for (key, (ty, shape)) in &self.outputs {
-                if *ty != "f32" {
-                    eprintln!("warning: non-f32 types aren't supported, and will be skipped in the output");
-                    continue;
-                }
+            for (key, (_ty, shape)) in &self.outputs {
                 let out = single_output.outputF32(key.clone());
                 if let Ok(array) = Array::from_shape_vec(shape.clone(), out) {
                     map.insert(key.clone(), array.into());
