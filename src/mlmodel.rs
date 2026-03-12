@@ -519,22 +519,34 @@ impl CoreMLModel {
                     match ty.as_str() {
                         "f32" => {
                             if !self.add_output_f32(&name, Array::<f32, _>::zeros(output_shape)) {
-                                eprintln!("warning: failed to bind output '{}'", name);
+                                return Err(CoreMLError::UnknownError(format!(
+                                    "failed to bind f32 output '{}'",
+                                    name
+                                )));
                             }
                         }
                         "f16" | "float16" => {
                             if !self.add_output_u16(&name, Array::<u16, _>::zeros(output_shape)) {
-                                eprintln!("warning: failed to bind output '{}'", name);
+                                return Err(CoreMLError::UnknownError(format!(
+                                    "failed to bind f16 output '{}'",
+                                    name
+                                )));
                             }
                         }
                         "int32" | "int64" | "int16" | "uint32" | "uint64" | "uint16" => {
                             if !self.add_output_i32(&name, Array::<i32, _>::zeros(output_shape)) {
-                                eprintln!("warning: failed to bind output '{}'", name);
+                                return Err(CoreMLError::UnknownError(format!(
+                                    "failed to bind i32 output '{}'",
+                                    name
+                                )));
                             }
                         }
                         "bool" | "boolean" => {
                             if !self.add_output_f32(&name, Array::<f32, _>::zeros(output_shape)) {
-                                eprintln!("warning: failed to bind output '{}'", name);
+                                return Err(CoreMLError::UnknownError(format!(
+                                    "failed to bind bool output '{}'",
+                                    name
+                                )));
                             }
                         }
                         _ => {
