@@ -183,10 +183,17 @@ impl MLArray {
     /// Helper to convert standard ArrayBase via Any.
     fn downcast_any<A: 'static, T: 'static>(
         a: Array<A, Dim<IxDynImpl>>,
-    ) -> Array<T, Dim<IxDynImpl>> {
-        // Since we checked actual == expected, T is A. Safe to use boxed Any downcast.
+    ) -> Result<Array<T, Dim<IxDynImpl>>, String> {
         let boxed: Box<dyn std::any::Any> = Box::new(a);
-        *boxed.downcast::<Array<T, Dim<IxDynImpl>>>().unwrap()
+        boxed
+            .downcast::<Array<T, Dim<IxDynImpl>>>()
+            .map(|b| *b)
+            .map_err(|_| {
+                format!(
+                    "Internal downcast failed: expected {}, got different type",
+                    std::any::type_name::<T>()
+                )
+            })
     }
 
     /// Try to extract as typed tensor. Returns Err if type doesn't match the variant.
@@ -202,7 +209,7 @@ impl MLArray {
             ));
         }
 
-        Ok(match self {
+        match self {
             MLArray::Float32Array(a) => Self::downcast_any(a),
             MLArray::Float16Array(a) => Self::downcast_any(a),
             MLArray::Int32Array(a) => Self::downcast_any(a),
@@ -211,7 +218,7 @@ impl MLArray {
             MLArray::UInt32Array(a) => Self::downcast_any(a),
             MLArray::UInt16Array(a) => Self::downcast_any(a),
             MLArray::UInt8Array(a) => Self::downcast_any(a),
-        })
+        }
     }
 }
 
