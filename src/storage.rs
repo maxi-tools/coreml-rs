@@ -1,5 +1,7 @@
 use crate::error::CoreMLError;
 use flate2::Compression;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::Hasher;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -8,12 +10,16 @@ pub fn save_buffer_to_disk(vec: &[u8], cache_dir: &mut PathBuf) -> Result<PathBu
         *cache_dir = PathBuf::from(".");
     }
     // Determine target path: if the path already exists as a directory or has no extension,
-    // treat as directory and append "model_cache". Otherwise treat as a file path.
+    // treat as directory and append a content-hashed filename to avoid collisions when
+    // multiple models share the same cache directory.
     let m = if cache_dir.is_dir() || (!cache_dir.is_file() && cache_dir.extension().is_none()) {
         if !cache_dir.exists() {
             std::fs::create_dir_all(&cache_dir)?;
         }
-        cache_dir.join("model_cache")
+        let mut hasher = DefaultHasher::new();
+        hasher.write(vec);
+        let hash = hasher.finish();
+        cache_dir.join(format!("model_cache_{:016x}", hash))
     } else {
         if let Some(parent) = cache_dir.parent().filter(|p| !p.as_os_str().is_empty()) {
             if !parent.exists() {
