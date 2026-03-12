@@ -300,7 +300,7 @@ impl CoreMLBatchModel {
                 let out = output_at_idx.outputF32(name);
 
                 let array = Array::from_shape_vec(shape.clone(), out).map_err(|e| {
-                    CoreMLError::BadInputShape(format!("output '{}' shape mismatch: {}", key, e))
+                    CoreMLError::BadInputShape(format!("Failed to reshape batch output feature '{}': {}", key, e))
                 })?;
                 batch_item_outputs.insert(key.clone(), array.into());
             }
