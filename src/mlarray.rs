@@ -339,9 +339,9 @@ mod tests {
         let arr = Array::from_shape_vec(IxDyn(&[2]), vec![1.0f32, 2.0]).unwrap();
         let ml: MLArray = arr.into();
         assert!(ml.try_as_view_f32().is_ok());
-        assert!(ml.try_as_view_i32().is_err());
+        let err = ml.try_as_view_i32().unwrap_err();
         assert_eq!(
-            ml.try_as_view_i32().unwrap_err(),
+            err,
             "MLArray type mismatch: expected i32, found type_id=f32"
         );
 
