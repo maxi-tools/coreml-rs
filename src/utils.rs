@@ -44,10 +44,8 @@ pub fn save_buffer_to_disk(vec: &[u8], cache_dir: &mut PathBuf) -> Result<PathBu
         cache_dir.join("model_cache")
     };
 
-    let mut encoder = flate2::write::ZlibEncoder::new(
-        std::fs::File::create(&m)?,
-        Compression::best(),
-    );
+    let mut encoder =
+        flate2::write::ZlibEncoder::new(std::fs::File::create(&m)?, Compression::best());
     encoder.write_all(vec)?;
     encoder.finish()?;
 
