@@ -35,8 +35,7 @@ fn main() {
             .output()
         {
             if output.status.success() {
-                String::from_utf8(output.stdout.as_slice().into())
-                    .unwrap_or_default()
+                String::from_utf8_lossy(&output.stdout)
                     .trim()
                     .to_string()
             } else {
