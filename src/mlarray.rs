@@ -195,7 +195,7 @@ pub trait MLArrayBaseExt {
 }
 
 impl MLArray {
-    pub fn into_contiguous_raw_vec_and_shape<T: MLType + Clone>(self) -> (Vec<T>, Vec<i32>) {
+    pub fn into_contiguous_raw_vec_and_shape<T: MLType>(self) -> (Vec<T>, Vec<i32>) {
         let shape = self.shape().iter().map(|&i| i as i32).collect::<Vec<i32>>();
         let data = self.extract_to_tensor::<T>().into_contiguous_raw_vec();
         (data, shape)
