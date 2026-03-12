@@ -48,10 +48,6 @@ name = "load"
 path = "tests/load.rs"
 
 [[test]]
-name = "options"
-path = "tests/options.rs"
-
-[[test]]
 name = "mlarray_types"
 path = "tests/mlarray_types.rs"
 
