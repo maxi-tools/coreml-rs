@@ -84,7 +84,7 @@ fn compile_swift() {
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            println!("cargo:warning=Swift compiler not found, skipping build. Use this mode ONLY for `cargo check --tests`.");
+            println!("cargo:warning=Swift compiler not found, skipping Swift compilation.");
         }
         Err(e) => {
             panic!("Failed to spawn swift build command: {}", e);

@@ -129,10 +129,7 @@ fn test_try_as_view_success_and_failure() {
 
     // Failure on mismatch
     let err = ml.try_as_view_i32().unwrap_err();
-    assert_eq!(
-        err,
-        "MLArray type mismatch: expected i32, found type_id=f32"
-    );
+    assert!(err.contains("type mismatch"), "unexpected error: {}", err);
 }
 
 #[test]

@@ -117,7 +117,10 @@ impl<T: MLType> From<ArrayBase<OwnedRepr<T>, Dim<IxDynImpl>>> for MLArray {
                 TY_I16 => MLArray::Int16Array(std::mem::transmute(value)),
                 TY_I8 => MLArray::Int8Array(std::mem::transmute(value)),
                 TY_U32 => MLArray::UInt32Array(std::mem::transmute(value)),
-                _ => unreachable!("Only explicitly supported MLTypes can trigger this"),
+                _ => panic!(
+                    "unsupported MLType type_id={} — add a variant to MLArray and a TY_ constant",
+                    T::TY
+                ),
             }
         }
     }
@@ -149,8 +152,8 @@ impl MLArray {
         let expected = T::TY;
         if actual != expected {
             return Err(format!(
-                "MLArray type mismatch: array holds type_id={} but extract requested type_id={}",
-                actual, expected
+                "MLArray type mismatch: expected type_id={}, found type_id={}",
+                expected, actual
             ));
         }
         unsafe {
