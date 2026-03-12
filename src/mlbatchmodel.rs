@@ -253,9 +253,7 @@ impl CoreMLBatchModel {
         match input {
             MLArray::Float32Array(array_base) => bind_input!(array_base, bindInputF32),
             _ => {
-                return Err(CoreMLError::UnknownErrorStatic(
-                    "unsupported input type for batch model: currently only f32 is supported",
-                ));
+                return Err(CoreMLError::BindInputFailed);
             }
         }
         Ok(())

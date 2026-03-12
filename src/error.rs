@@ -15,8 +15,6 @@ pub enum CoreMLError {
     UnknownErrorStatic(&'static str),
     #[error("BindInputFailed: failed to bind input to model")]
     BindInputFailed,
-    #[error("BindOutputFailed: failed to bind output to model")]
-    BindOutputFailed,
     #[error("UnsupportedOutputType: {0}")]
     UnsupportedOutputType(&'static str),
     #[error("ModelNotLoaded: coreml model not loaded into session")]

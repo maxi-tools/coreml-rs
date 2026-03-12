@@ -87,7 +87,14 @@ fn compile_swift() {
             }
         }
         Err(e) => {
-            eprintln!("Failed to spawn swift build command: {}. Ignoring so cargo check --tests can be used.", e);
+            // Only ignore if swift is genuinely unavailable (cargo check --tests mode)
+            if Command::new("swift").arg("--version").output().is_ok() {
+                panic!("Failed to spawn swift build command: {}", e);
+            }
+            println!(
+                "cargo:warning=Swift compiler not available, skipping build: {}",
+                e
+            );
         }
     }
 }
