@@ -4,7 +4,7 @@ use coreml_rs::CoreMLModelOptions;
 fn test_coreml_model_options_default() {
     let opts = CoreMLModelOptions::default();
     assert_eq!(opts.compute_platform, coreml_rs::ffi::ComputePlatform::All);
-    assert_eq!(opts.cache_dir.display().to_string(), ".");
+    assert_eq!(opts.cache_dir, std::path::PathBuf::default());
 }
 
 #[test]
