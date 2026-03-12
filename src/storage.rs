@@ -7,8 +7,8 @@ pub fn save_buffer_to_disk(vec: &[u8], cache_dir: &mut PathBuf) -> Result<PathBu
     if cache_dir.as_os_str().is_empty() {
         *cache_dir = PathBuf::from(".");
     }
-    // Determine target path: if the path already exists as a directory or has no extension,
-    // treat as directory and append "model_cache". Otherwise treat as a file path.
+    // Determine target path before creating directories: if path has an extension,
+    // treat it as a file path (create parent dir); otherwise treat as directory.
     let m = if cache_dir.is_dir() || cache_dir.extension().is_none() {
         if !cache_dir.exists() {
             std::fs::create_dir_all(&cache_dir)?;
@@ -23,10 +23,12 @@ pub fn save_buffer_to_disk(vec: &[u8], cache_dir: &mut PathBuf) -> Result<PathBu
         cache_dir.clone()
     };
 
-    let file = std::fs::File::create(&m)?;
-    let mut encoder = flate2::write::ZlibEncoder::new(file, Compression::best());
-    encoder.write_all(vec)?;
-    encoder.finish()?;
+    std::fs::File::create(&m).and_then(|file| {
+        let mut encoder = flate2::write::ZlibEncoder::new(file, Compression::best());
+        encoder.write_all(vec)?;
+        encoder.finish()?;
+        Ok(())
+    })?;
 
     Ok(m)
 }

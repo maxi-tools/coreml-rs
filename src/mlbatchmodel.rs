@@ -299,13 +299,8 @@ impl CoreMLBatchModel {
                 let name = key.clone();
                 let out = output_at_idx.outputF32(name);
 
-                match Array::from_shape_vec(shape.clone(), out) {
-                    Ok(array) => {
-                        batch_item_outputs.insert(key.clone(), array.into());
-                    }
-                    Err(e) => {
-                        eprintln!("warning: output '{}' shape mismatch: {}", key, e);
-                    }
+                if let Ok(array) = Array::from_shape_vec(shape.clone(), out) {
+                    batch_item_outputs.insert(key.clone(), array.into());
                 }
             }
             all_outputs.push(batch_item_outputs);

@@ -29,7 +29,6 @@ pub use swift::swift as ffi;
 pub use error::CoreMLError;
 pub use mlarray::MLArray;
 pub use mlbatchmodel::CoreMLBatchModelWithState;
-pub use mlmodel::StatefulModel;
 
 /// Type alias for model input and output feature names
 pub type FeatureName = String;
