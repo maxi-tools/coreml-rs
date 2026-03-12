@@ -34,10 +34,14 @@ fn main() {
             .arg("--print-path")
             .output()
         {
-            String::from_utf8(output.stdout.as_slice().into())
-                .unwrap()
-                .trim()
-                .to_string()
+            if output.status.success() {
+                String::from_utf8(output.stdout.as_slice().into())
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string()
+            } else {
+                "/Applications/Xcode.app/Contents/Developer".to_string()
+            }
         } else {
             "/Applications/Xcode.app/Contents/Developer".to_string()
         };

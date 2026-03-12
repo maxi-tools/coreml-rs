@@ -512,16 +512,24 @@ impl CoreMLModel {
                     };
                     match ty.as_str() {
                         "f32" => {
-                            self.add_output_f32(name, Array::<f32, _>::zeros(output_shape));
+                            if !self.add_output_f32(&name, Array::<f32, _>::zeros(output_shape)) {
+                                eprintln!("warning: failed to bind output '{}'", name);
+                            }
                         }
                         "f16" | "float16" => {
-                            self.add_output_u16(name, Array::<u16, _>::zeros(output_shape));
+                            if !self.add_output_u16(&name, Array::<u16, _>::zeros(output_shape)) {
+                                eprintln!("warning: failed to bind output '{}'", name);
+                            }
                         }
                         "int32" | "int64" | "int16" | "uint32" | "uint64" | "uint16" => {
-                            self.add_output_i32(name, Array::<i32, _>::zeros(output_shape));
+                            if !self.add_output_i32(&name, Array::<i32, _>::zeros(output_shape)) {
+                                eprintln!("warning: failed to bind output '{}'", name);
+                            }
                         }
                         "bool" | "boolean" => {
-                            self.add_output_f32(name, Array::<f32, _>::zeros(output_shape));
+                            if !self.add_output_f32(&name, Array::<f32, _>::zeros(output_shape)) {
+                                eprintln!("warning: failed to bind output '{}'", name);
+                            }
                         }
                         _ => {
                             return Err(CoreMLError::UnknownErrorStatic(
