@@ -69,22 +69,26 @@ fn compile_swift() {
         cmd.args(["-c", "release"]);
     }
 
-    if let Ok(child) = cmd.spawn() {
-        let exit_status = child.wait_with_output().unwrap_or_else(|e| {
-            eprintln!("Failed to wait for swift build: {}", e);
-            std::process::exit(1);
-        });
+    match cmd.spawn() {
+        Ok(child) => {
+            let exit_status = child
+                .wait_with_output()
+                .expect("Failed to wait for swift build");
 
-        if !exit_status.status.success() {
-            eprintln!(
-                "Swift build failed:\nStderr: {}\nStdout: {}",
-                String::from_utf8_lossy(&exit_status.stderr),
-                String::from_utf8_lossy(&exit_status.stdout),
-            );
-            std::process::exit(1);
+            if !exit_status.status.success() {
+                panic!(
+                    "Swift build failed:\nStderr: {}\nStdout: {}",
+                    String::from_utf8_lossy(&exit_status.stderr),
+                    String::from_utf8_lossy(&exit_status.stdout),
+                );
+            }
         }
-    } else {
-        println!("cargo:warning=Failed to spawn swift build command. In environment lacking Swift toolchain, build handles gracefully so `cargo check --tests` can be used.");
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            println!("cargo:warning=Swift compiler not found, skipping build. Use this mode ONLY for `cargo check --tests`.");
+        }
+        Err(e) => {
+            panic!("Failed to spawn swift build command: {}", e);
+        }
     }
 }
 
