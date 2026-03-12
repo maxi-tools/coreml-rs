@@ -44,8 +44,10 @@ pub fn save_buffer_to_disk(vec: &[u8], cache_dir: &mut PathBuf) -> Result<PathBu
         cache_dir.join("model_cache")
     };
 
-    let file = std::fs::File::create(&m)?;
-    let mut encoder = flate2::write::ZlibEncoder::new(file, Compression::best());
+    let mut encoder = flate2::write::ZlibEncoder::new(
+        std::fs::File::create(&m)?,
+        Compression::best(),
+    );
     encoder.write_all(vec)?;
     encoder.finish()?;
 
@@ -87,7 +89,8 @@ mod tests {
     #[test]
     fn test_save_and_load_buffer_to_disk() {
         let mut temp_dir = std::env::temp_dir();
-        temp_dir.push(format!("coreml_rs_test_cache_{}", std::process::id()));
+        let pid = std::process::id();
+        temp_dir.push(format!("coreml_rs_test_cache_{}", pid));
         let data = b"Hello CoreML";
 
         let path = save_buffer_to_disk(data, &mut temp_dir).unwrap();

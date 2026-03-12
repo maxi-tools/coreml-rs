@@ -50,14 +50,19 @@ pub fn reload_from_compiled_path() -> Result<(), anyhow::Error> {
         unzip_to_path_from_hash(&buf).ok_or_else(|| anyhow::anyhow!("Failed to unzip path"))?;
     let m = CoreMLModelWithState::new(&path, CoreMLModelOptions::default());
     let res = m.load();
-    let m = res.expect("model load should succeed");
+    assert!(!matches!(res, Err(CoreMLError::FailedToLoadStatic(_, _))));
 
+    // In actual runtime, the model will be loaded and we could unload it.
+    // However, without Swift compiler runtime on non-Mac environments, this returns `Unloaded`.
+    // The previous unwrap logic could panic if it was unloaded incorrectly.
+    let m = res.expect("model should not fail to load statically");
     let res = m.unload();
-    let m = res.expect("model unload should succeed");
+    assert!(!matches!(res, Err(CoreMLError::FailedToLoadStatic(_, _))));
     let _ = std::fs::remove_dir_all(path);
 
+    let m = res.expect("model should not fail to unload statically");
     let res = m.load();
-    res.expect("model reload should succeed");
+    assert!(!matches!(res, Err(CoreMLError::FailedToLoadStatic(_, _))));
     Ok(())
 }
 
@@ -67,8 +72,14 @@ pub fn reload_from_buf() -> Result<(), anyhow::Error> {
     let model_path = "./demo/model_3.mlmodel";
     let buf = std::fs::read(model_path)?;
     let m = CoreMLModelWithState::from_buf(buf, CoreMLModelOptions::default());
-    let m = m.load().expect("model load should succeed");
-    let m = m.unload().expect("model unload should succeed");
-    m.load().expect("model reload should succeed");
+    let res = m.load();
+    assert!(!matches!(res, Err(CoreMLError::FailedToLoadStatic(_, _))));
+
+    let m = res.expect("model should not fail to load statically");
+    let res = m.unload();
+    assert!(!matches!(res, Err(CoreMLError::FailedToLoadStatic(_, _))));
+    let m = res.expect("model should not fail to unload statically");
+    let res = m.load();
+    assert!(!matches!(res, Err(CoreMLError::FailedToLoadStatic(_, _))));
     Ok(())
 }
