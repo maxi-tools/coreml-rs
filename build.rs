@@ -7,52 +7,39 @@ fn main() {
     swift_bridge_build::parse_bridges(bridge_files)
         .write_all_concatenated(swift_bridge_out_dir(), "rust-calls-swift");
 
-    // Require Swift compiler — without it the FFI layer cannot be built.
-    // Only allow skipping via COREML_RS_SKIP_SWIFT=1 for cargo check workflows.
-    if Command::new("swift").arg("--version").output().is_ok() {
-        // 2. Compile Swift library
-        compile_swift();
-    } else if std::env::var("COREML_RS_SKIP_SWIFT").as_deref() == Ok("1") {
-        println!("cargo:warning=Swift compiler not found. Skipping Swift compilation (COREML_RS_SKIP_SWIFT=1).");
-    } else {
-        panic!("Swift compiler not found. Install Xcode or set COREML_RS_SKIP_SWIFT=1 for check-only builds.");
-    }
+    // 2. Compile Swift library
+    compile_swift();
 
     // 3. Link to Swift library
-    if Command::new("swift").arg("--version").output().is_ok() {
-        println!("cargo:rustc-link-lib=static=swift-library");
-        println!(
-            "cargo:rustc-link-search={}",
-            swift_library_static_lib_dir().to_str().unwrap()
-        );
+    println!("cargo:rustc-link-lib=static=swift-library");
+    println!(
+        "cargo:rustc-link-search={}",
+        swift_library_static_lib_dir().to_str().unwrap()
+    );
 
-        // Without this we will get warnings about not being able to find dynamic libraries, and then
-        // we won't be able to compile since the Swift static libraries depend on them:
-        // For example:
-        // ld: warning: Could not find or use auto-linked library 'swiftCompatibility51'
-        // ld: warning: Could not find or use auto-linked library 'swiftCompatibility50'
-        // ld: warning: Could not find or use auto-linked library 'swiftCompatibilityDynamicReplacements'
-        // ld: warning: Could not find or use auto-linked library 'swiftCompatibilityConcurrency'
-        let xcode_path = if let Ok(output) = std::process::Command::new("xcode-select")
-            .arg("--print-path")
-            .output()
-        {
-            if output.status.success() {
-                String::from_utf8_lossy(output.stdout.as_slice())
-                    .trim()
-                    .to_string()
-            } else {
-                "/Applications/Xcode.app/Contents/Developer".to_string()
-            }
-        } else {
-            "/Applications/Xcode.app/Contents/Developer".to_string()
-        };
-        println!(
-            "cargo:rustc-link-search={}/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx/",
-            &xcode_path
-        );
-        println!("cargo:rustc-link-search=/usr/lib/swift");
-    }
+    // Without this we will get warnings about not being able to find dynamic libraries, and then
+    // we won't be able to compile since the Swift static libraries depend on them:
+    // For example:
+    // ld: warning: Could not find or use auto-linked library 'swiftCompatibility51'
+    // ld: warning: Could not find or use auto-linked library 'swiftCompatibility50'
+    // ld: warning: Could not find or use auto-linked library 'swiftCompatibilityDynamicReplacements'
+    // ld: warning: Could not find or use auto-linked library 'swiftCompatibilityConcurrency'
+    let xcode_path = if let Ok(output) = std::process::Command::new("xcode-select")
+        .arg("--print-path")
+        .output()
+    {
+        String::from_utf8(output.stdout.as_slice().into())
+            .unwrap()
+            .trim()
+            .to_string()
+    } else {
+        "/Applications/Xcode.app/Contents/Developer".to_string()
+    };
+    println!(
+        "cargo:rustc-link-search={}/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx/",
+        &xcode_path
+    );
+    println!("cargo:rustc-link-search=/usr/lib/swift");
 }
 
 fn compile_swift() {
@@ -82,22 +69,38 @@ fn compile_swift() {
         cmd.args(["-c", "release"]);
     }
 
-    let child = cmd.spawn().unwrap_or_else(|e| {
-        eprintln!("Failed to spawn swift build command: {}", e);
-        std::process::exit(1);
-    });
-    let exit_status = child.wait_with_output().unwrap_or_else(|e| {
-        eprintln!("Failed to wait for swift build: {}", e);
-        std::process::exit(1);
-    });
+    let child = cmd.spawn();
+    match child {
+        Ok(child) => {
+            let exit_status = child.wait_with_output().unwrap_or_else(|e| {
+                eprintln!("Failed to wait for swift build: {}", e);
+                std::process::exit(1);
+            });
 
-    if !exit_status.status.success() {
-        eprintln!(
-            "Swift build failed:\nStderr: {}\nStdout: {}",
-            String::from_utf8_lossy(&exit_status.stderr),
-            String::from_utf8_lossy(&exit_status.stdout),
-        );
-        std::process::exit(1);
+            if !exit_status.status.success() {
+                eprintln!(
+                    "Swift build failed:\nStderr: {}\nStdout: {}",
+                    String::from_utf8_lossy(&exit_status.stderr),
+                    String::from_utf8_lossy(&exit_status.stdout),
+                );
+                std::process::exit(1);
+            }
+        }
+        Err(e) => {
+            // Skip Swift build only when explicitly requested (COREML_RS_SKIP_SWIFT=1)
+            // or if it fails because swift wasn't found in a check.
+            if e.kind() != std::io::ErrorKind::NotFound {
+                panic!("Failed to spawn swift build command: {}", e);
+            }
+            if std::env::var("COREML_RS_SKIP_SWIFT").as_deref() == Ok("1") {
+                println!(
+                    "cargo:warning=Swift compiler not available, skipping build (COREML_RS_SKIP_SWIFT=1): {}",
+                    e
+                );
+            } else {
+                panic!("Swift compiler not available, but COREML_RS_SKIP_SWIFT=1 is not set. Install Swift or opt out: {}", e);
+            }
+        }
     }
 }
 

@@ -195,7 +195,7 @@ pub trait MLArrayBaseExt {
 }
 
 impl MLArray {
-    pub fn into_contiguous_raw_vec_and_shape<T: MLType + Clone>(self) -> (Vec<T>, Vec<i32>) {
+    pub fn into_contiguous_raw_vec_and_shape<T: MLType>(self) -> (Vec<T>, Vec<i32>) {
         let shape = self.shape().iter().map(|&i| i as i32).collect::<Vec<i32>>();
         let data = self.extract_to_tensor::<T>().into_contiguous_raw_vec();
         (data, shape)
@@ -204,94 +204,34 @@ impl MLArray {
 
 use ndarray::ArrayView;
 
-impl MLArray {
-    pub fn try_as_view_f32(&self) -> Result<ArrayView<'_, f32, Dim<IxDynImpl>>, String> {
-        if let MLArray::Float32Array(a) = self {
-            Ok(a.view())
-        } else {
-            Err(format!(
-                "MLArray type mismatch: expected f32, found type_id={}",
-                self.type_id_str()
-            ))
+macro_rules! generate_try_as_view {
+    ($($ty:ty => $variant:ident => $fn_name:ident),* $(,)?) => {
+        impl MLArray {
+            $(
+                pub fn $fn_name(&self) -> Result<ArrayView<'_, $ty, Dim<IxDynImpl>>, String> {
+                    if let MLArray::$variant(a) = self {
+                        Ok(a.view())
+                    } else {
+                        Err(format!(
+                            concat!("MLArray type mismatch: expected ", stringify!($ty), ", found type_id={}"),
+                            self.type_id_str()
+                        ))
+                    }
+                }
+            )*
         }
-    }
+    };
+}
 
-    pub fn try_as_view_f16(&self) -> Result<ArrayView<'_, f16, Dim<IxDynImpl>>, String> {
-        if let MLArray::Float16Array(a) = self {
-            Ok(a.view())
-        } else {
-            Err(format!(
-                "MLArray type mismatch: expected f16, found type_id={}",
-                self.type_id_str()
-            ))
-        }
-    }
-
-    pub fn try_as_view_i32(&self) -> Result<ArrayView<'_, i32, Dim<IxDynImpl>>, String> {
-        if let MLArray::Int32Array(a) = self {
-            Ok(a.view())
-        } else {
-            Err(format!(
-                "MLArray type mismatch: expected i32, found type_id={}",
-                self.type_id_str()
-            ))
-        }
-    }
-
-    pub fn try_as_view_i16(&self) -> Result<ArrayView<'_, i16, Dim<IxDynImpl>>, String> {
-        if let MLArray::Int16Array(a) = self {
-            Ok(a.view())
-        } else {
-            Err(format!(
-                "MLArray type mismatch: expected i16, found type_id={}",
-                self.type_id_str()
-            ))
-        }
-    }
-
-    pub fn try_as_view_i8(&self) -> Result<ArrayView<'_, i8, Dim<IxDynImpl>>, String> {
-        if let MLArray::Int8Array(a) = self {
-            Ok(a.view())
-        } else {
-            Err(format!(
-                "MLArray type mismatch: expected i8, found type_id={}",
-                self.type_id_str()
-            ))
-        }
-    }
-
-    pub fn try_as_view_u32(&self) -> Result<ArrayView<'_, u32, Dim<IxDynImpl>>, String> {
-        if let MLArray::UInt32Array(a) = self {
-            Ok(a.view())
-        } else {
-            Err(format!(
-                "MLArray type mismatch: expected u32, found type_id={}",
-                self.type_id_str()
-            ))
-        }
-    }
-
-    pub fn try_as_view_u16(&self) -> Result<ArrayView<'_, u16, Dim<IxDynImpl>>, String> {
-        if let MLArray::UInt16Array(a) = self {
-            Ok(a.view())
-        } else {
-            Err(format!(
-                "MLArray type mismatch: expected u16, found type_id={}",
-                self.type_id_str()
-            ))
-        }
-    }
-
-    pub fn try_as_view_u8(&self) -> Result<ArrayView<'_, u8, Dim<IxDynImpl>>, String> {
-        if let MLArray::UInt8Array(a) = self {
-            Ok(a.view())
-        } else {
-            Err(format!(
-                "MLArray type mismatch: expected u8, found type_id={}",
-                self.type_id_str()
-            ))
-        }
-    }
+generate_try_as_view! {
+    f32 => Float32Array => try_as_view_f32,
+    f16 => Float16Array => try_as_view_f16,
+    i32 => Int32Array => try_as_view_i32,
+    i16 => Int16Array => try_as_view_i16,
+    i8  => Int8Array => try_as_view_i8,
+    u32 => UInt32Array => try_as_view_u32,
+    u16 => UInt16Array => try_as_view_u16,
+    u8  => UInt8Array => try_as_view_u8,
 }
 
 impl MLArray {

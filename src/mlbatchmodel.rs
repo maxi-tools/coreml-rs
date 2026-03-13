@@ -7,7 +7,6 @@ use crate::{
     swift::MLBatchModelOutput,
     CoreMLModelOptions,
 };
-
 use ndarray::Array;
 use std::{collections::HashMap, io::Write, path::Path};
 use tempfile::NamedTempFile;
@@ -57,7 +56,6 @@ impl CoreMLBatchModelWithState {
                         Self::Unloaded(info, loader),
                     ));
                 }
-                coreml_model.init_caches();
                 Ok(Self::Loaded(coreml_model, info, loader))
             }
             CoreMLModelLoader::CompiledPath(path_buf) => {
@@ -74,7 +72,6 @@ impl CoreMLBatchModelWithState {
                         Self::Unloaded(info, loader),
                     ));
                 }
-                coreml_model.init_caches();
                 Ok(Self::Loaded(coreml_model, info, loader))
             }
             CoreMLModelLoader::Buffer(vec) => {
@@ -86,7 +83,6 @@ impl CoreMLBatchModelWithState {
                         Self::Unloaded(info, CoreMLModelLoader::Buffer(vec)),
                     ));
                 }
-                coreml_model.init_caches();
                 let loader = CoreMLModelLoader::Buffer(vec);
                 Ok(Self::Loaded(coreml_model, info, loader))
             }
@@ -100,7 +96,6 @@ impl CoreMLBatchModelWithState {
                             Self::Unloaded(info, CoreMLModelLoader::BufferToDisk(u)),
                         ));
                     }
-                    coreml_model.init_caches();
                     let loader = CoreMLModelLoader::BufferToDisk(u);
                     Ok(Self::Loaded(coreml_model, info, loader))
                 }
@@ -169,10 +164,6 @@ impl CoreMLBatchModelWithState {
         }
     }
 
-    /// ⚡ Maxima: Zero-cost FFI annihilation.
-    /// This method previously crossed the FFI boundary to Swift every single time an input was added
-    /// just to check the shape. Now it looks up a pre-cached map.
-    /// It also avoids creating a useless empty Vec allocation for the fallback by using a static slice.
     pub fn add_input(
         &mut self,
         tag: impl AsRef<str>,
@@ -200,8 +191,6 @@ pub struct CoreMLBatchModel {
     model: BatchModel,
     // save_path: Option<PathBuf>,
     outputs: HashMap<String, (&'static str, Vec<usize>)>,
-    input_shapes: HashMap<String, Vec<usize>>,
-    output_info: Vec<(String, Vec<usize>, String)>,
 }
 
 unsafe impl Send for CoreMLBatchModel {}
@@ -218,8 +207,6 @@ impl CoreMLBatchModel {
             model: modelWithPathBatch(path, info.opts.compute_platform, compiled),
             // save_path: None,
             outputs: Default::default(),
-            input_shapes: Default::default(),
-            output_info: Default::default(),
         }
     }
 
@@ -232,35 +219,9 @@ impl CoreMLBatchModel {
             ),
             // save_path: None,
             outputs: Default::default(),
-            input_shapes: Default::default(),
-            output_info: Default::default(),
         };
         std::mem::forget(buf);
         coreml_model
-    }
-
-    fn init_caches(&mut self) {
-        let desc = self.model.description();
-
-        let mut input_shapes = HashMap::new();
-        for name in desc.inputs() {
-            input_shapes.insert(name.clone(), desc.input_shape(name));
-        }
-        self.input_shapes = input_shapes;
-
-        let mut output_info = Vec::new();
-        for name in desc.output_names() {
-            let shape = desc.output_shape(name.clone());
-            let ty = desc.output_type(name.clone());
-            output_info.push((name, shape, ty));
-        }
-        self.output_info = output_info;
-
-        for (name, shape, ty) in &self.output_info {
-            if ty.as_str() == "f32" {
-                self.outputs.insert(name.clone(), ("f32", shape.to_vec()));
-            }
-        }
     }
 
     pub fn add_input(
@@ -272,45 +233,46 @@ impl CoreMLBatchModel {
         // route input correctly
         let input: MLArray = input.into();
         let name = tag.as_ref().to_string();
+        let desc = self.model.description();
         let shape: Vec<usize> = input.shape().to_vec();
-
-        let arr = self
-            .input_shapes
-            .get(&name)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[]);
-        crate::utils::validate_coreml_shape(arr, &shape, &name)?;
-        match input {
-            MLArray::Float32Array(array_base) => {
-                let mut data = array_base.into_contiguous_raw_vec();
-                if !self
-                    .model
-                    .bindInputF32(shape, name, data.as_mut_ptr(), data.capacity(), idx)
-                {
-                    return Err(CoreMLError::UnknownErrorStatic(
-                        "failed to bind input to model",
-                    ));
+        let arr = desc.input_shape(name.clone());
+        crate::utils::validate_coreml_shape(&arr, &shape, &name)?;
+        macro_rules! bind_input {
+            ($array_base:ident, $bind_method:ident $(, $cast:ty)?) => {{
+                // Ensure C-contiguous layout before extracting raw data,
+                // since bindInput assumes C-contiguous strides.
+                let mut data = $array_base.into_contiguous_raw_vec();
+                let ptr = data.as_mut_ptr() $(as *mut $cast)?;
+                if !self.model.$bind_method(shape, name, ptr, data.capacity(), idx) {
+                    return Err(CoreMLError::BindInputFailed("buffer"));
                 }
                 std::mem::forget(data);
-            }
+            }};
+        }
+
+        match input {
+            MLArray::Float32Array(array_base) => bind_input!(array_base, bindInputF32),
             _ => {
-                return Err(CoreMLError::UnknownErrorStatic(
-                    "failed to bind input to model",
-                ));
+                return Err(CoreMLError::BindInputFailed("unsupported batch input type"));
             }
         }
         Ok(())
     }
 
-    /// ⚡ Maxima: Zero-cost iteration over batch outputs.
-    /// Previously this repeatedly cloned the `outputs` map `n` times just to build an iterator.
-    /// Now it safely iterates over the references using pre-allocated maps.
     pub fn predict(&mut self) -> Result<MLBatchModelOutput, CoreMLError> {
-        for (_name, _shape, ty) in &self.output_info {
-            if ty.as_str() != "f32" {
-                return Err(CoreMLError::UnknownErrorStatic(
-                    "non-f32 output types are not supported (yet)!",
-                ));
+        let desc = self.model.description();
+        for name in desc.output_names() {
+            let shape = desc.output_shape(name.clone());
+            let ty = desc.output_type(name.clone());
+            match ty.as_str() {
+                "f32" => {
+                    self.outputs.insert(name, ("f32", shape.to_vec()));
+                }
+                _ => {
+                    return Err(CoreMLError::UnsupportedOutputType(
+                        "non-f32 output types are not supported (yet)!",
+                    ))
+                }
             }
         }
 
@@ -319,27 +281,27 @@ impl CoreMLBatchModel {
             return Err(CoreMLError::UnknownError(err));
         }
         let n = output.count();
-        let mut batch_outputs = Vec::with_capacity(n as usize);
-
-        for i in 0..n {
-            let single_output = output.for_idx(i);
-            let mut map = HashMap::with_capacity(self.outputs.len());
-
-            for (key, (ty, shape)) in &self.outputs {
-                if *ty != "f32" {
-                    eprintln!("warning: non-f32 types aren't supported, and will be skipped in the output");
-                    continue;
-                }
-                let out = single_output.outputF32(key.clone());
-                if let Ok(array) = Array::from_shape_vec(shape.clone(), out) {
-                    map.insert(key.clone(), array.into());
-                }
-            }
-            batch_outputs.push(map);
-        }
-
         Ok(MLBatchModelOutput {
-            outputs: batch_outputs,
+            outputs: (0..n).into_iter().map(|i|
+                    (i, self
+                        .outputs
+                        .clone()
+                        .into_iter())
+                )
+                .map(|(i, s)| {
+                    let output = output.for_idx(i);
+                    s.flat_map(|(key, (ty, shape))| {
+                        if ty != "f32" {
+                            eprintln!("warning: non-f32 types aren't supported, and will be skipped in the output");
+                            return None;
+                        }
+                        let name = key.clone();
+                        let out = output.outputF32(name);
+                        let array = Array::from_shape_vec(shape, out).ok()?;
+                        Some((key, array.into()))
+                    })
+                    .collect::<HashMap<String, MLArray>>()
+                }).collect()
         })
     }
 

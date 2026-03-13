@@ -3,7 +3,6 @@ use crate::{
     ffi::{modelWithAssets, modelWithPath, Model, ModelOutput},
     mlarray::MLArray,
 };
-
 use ndarray::Array;
 use std::{collections::HashMap, io::Write, path::Path};
 use tempfile::NamedTempFile;
@@ -57,7 +56,6 @@ impl CoreMLModelWithState {
                         Self::Unloaded(info, CoreMLModelLoader::ModelPath(path_buf)),
                     ));
                 }
-                coreml_model.init_caches();
                 Ok(Self::Loaded(
                     coreml_model,
                     info,
@@ -73,7 +71,6 @@ impl CoreMLModelWithState {
                         Self::Unloaded(info, CoreMLModelLoader::CompiledPath(path_buf)),
                     ));
                 }
-                coreml_model.init_caches();
                 Ok(Self::Loaded(
                     coreml_model,
                     info,
@@ -89,7 +86,6 @@ impl CoreMLModelWithState {
                         Self::Unloaded(info, CoreMLModelLoader::Buffer(vec)),
                     ));
                 }
-                coreml_model.init_caches();
                 let loader = CoreMLModelLoader::Buffer(vec);
                 Ok(Self::Loaded(coreml_model, info, loader))
             }
@@ -97,7 +93,6 @@ impl CoreMLModelWithState {
                 Ok(vec) => {
                     let mut coreml_model = CoreMLModel::load_buffer(vec, info.clone());
                     coreml_model.model.load();
-                    coreml_model.init_caches();
                     let loader = CoreMLModelLoader::BufferToDisk(u);
                     Ok(Self::Loaded(coreml_model, info, loader))
                 }
@@ -170,10 +165,6 @@ impl CoreMLModelWithState {
         }
     }
 
-    /// ⚡ Maxima: Zero-cost FFI annihilation.
-    /// This method previously crossed the FFI boundary to Swift every single time an input was added
-    /// just to check the shape. Now it looks up a pre-cached map.
-    /// It also avoids creating a useless empty Vec allocation for the fallback by using a static slice.
     pub fn add_input(
         &mut self,
         tag: impl AsRef<str>,
@@ -261,10 +252,6 @@ pub use crate::loader::CoreMLModelInfo;
 pub struct CoreMLModel {
     model: Model,
     outputs: HashMap<String, (&'static str, Vec<usize>)>,
-    input_shapes: HashMap<String, Vec<usize>>,
-    output_info: Vec<(String, Vec<usize>, String)>,
-    use_output_backing: Option<bool>,
-    use_output_backing_with_state: Option<bool>,
 }
 
 unsafe impl Send for CoreMLModel {}
@@ -280,10 +267,6 @@ impl CoreMLModel {
         Self {
             model: modelWithPath(path, info.opts.compute_platform, compiled),
             outputs: Default::default(),
-            input_shapes: Default::default(),
-            output_info: Default::default(),
-            use_output_backing: None,
-            use_output_backing_with_state: None,
         }
     }
 
@@ -295,31 +278,9 @@ impl CoreMLModel {
                 info.opts.compute_platform,
             ),
             outputs: Default::default(),
-            input_shapes: Default::default(),
-            output_info: Default::default(),
-            use_output_backing: None,
-            use_output_backing_with_state: None,
         };
         std::mem::forget(buf);
         coreml_model
-    }
-
-    fn init_caches(&mut self) {
-        let desc = self.model.description();
-
-        let mut input_shapes = HashMap::new();
-        for name in desc.inputs() {
-            input_shapes.insert(name.clone(), desc.input_shape(name));
-        }
-        self.input_shapes = input_shapes;
-
-        let mut output_info = Vec::new();
-        for name in desc.output_names() {
-            let shape = desc.output_shape(name.clone());
-            let ty = desc.output_type(name.clone());
-            output_info.push((name, shape, ty));
-        }
-        self.output_info = output_info;
     }
 
     pub fn add_input(
@@ -330,72 +291,28 @@ impl CoreMLModel {
         // route input correctly
         let input: MLArray = input.into();
         let name = tag.as_ref().to_string();
+        let desc = self.model.description();
         let shape: Vec<usize> = input.shape().to_vec();
+        let arr = desc.input_shape(name.clone());
+        crate::utils::validate_coreml_shape(&arr, &shape, &name)?;
+        macro_rules! bind_input {
+            ($array_base:ident, $bind_method:ident $(, $cast:ty)?) => {{
+                // Ensure C-contiguous layout before extracting raw data,
+                // since bindInput assumes C-contiguous strides.
+                let mut data = $array_base.into_contiguous_raw_vec();
+                let ptr = data.as_mut_ptr() $(as *mut $cast)?;
+                if !self.model.$bind_method(shape, name, ptr, data.capacity()) {
+                    return Err(CoreMLError::BindInputFailed("buffer"));
+                }
+                std::mem::forget(data);
+            }};
+        }
 
-        let arr = self
-            .input_shapes
-            .get(&name)
-            .map(|v| v.as_slice())
-            .unwrap_or(&[]);
-        crate::utils::validate_coreml_shape(arr, &shape, &name)?;
         match input {
-            MLArray::Float32Array(array_base) => {
-                // Ensure C-contiguous layout before extracting raw data,
-                // since bindInput assumes C-contiguous strides.
-                let mut data = array_base.into_contiguous_raw_vec();
-                if !self
-                    .model
-                    .bindInputF32(shape, name, data.as_mut_ptr(), data.capacity())
-                {
-                    return Err(CoreMLError::UnknownErrorStatic(
-                        "failed to bind input to model",
-                    ));
-                }
-                std::mem::forget(data);
-            }
-            MLArray::Float16Array(array_base) => {
-                // Ensure C-contiguous layout before extracting raw data,
-                // since bindInput assumes C-contiguous strides.
-                let mut data = array_base.into_contiguous_raw_vec();
-                if !self.model.bindInputU16(
-                    shape,
-                    name,
-                    data.as_mut_ptr() as *mut u16,
-                    data.capacity(),
-                ) {
-                    return Err(CoreMLError::UnknownErrorStatic(
-                        "failed to bind input to model",
-                    ));
-                }
-                std::mem::forget(data);
-            }
-            MLArray::Int32Array(array_base) => {
-                // Ensure C-contiguous layout before extracting raw data,
-                // since bindInput assumes C-contiguous strides.
-                let mut data = array_base.into_contiguous_raw_vec();
-                if !self
-                    .model
-                    .bindInputI32(shape, name, data.as_mut_ptr(), data.capacity())
-                {
-                    return Err(CoreMLError::UnknownErrorStatic(
-                        "failed to bind input to model",
-                    ));
-                }
-                std::mem::forget(data);
-            }
-            MLArray::UInt16Array(array_base) => {
-                // UInt16 uses the same Swift binding as Float16 (bindInputU16)
-                let mut data = array_base.into_contiguous_raw_vec();
-                if !self
-                    .model
-                    .bindInputU16(shape, name, data.as_mut_ptr(), data.capacity())
-                {
-                    return Err(CoreMLError::UnknownErrorStatic(
-                        "failed to bind u16 input to model",
-                    ));
-                }
-                std::mem::forget(data);
-            }
+            MLArray::Float32Array(array_base) => bind_input!(array_base, bindInputF32),
+            MLArray::Float16Array(array_base) => bind_input!(array_base, bindInputU16, u16),
+            MLArray::Int32Array(array_base) => bind_input!(array_base, bindInputI32),
+            MLArray::UInt16Array(array_base) => bind_input!(array_base, bindInputU16),
             _ => {
                 return Err(CoreMLError::BadInputShape(format!(
                     "unsupported input type for '{}': only f32, f16, i32, u16, and CVPixelBuffer inputs are supported",
@@ -434,9 +351,7 @@ impl CoreMLModel {
             data.as_mut_ptr(),
             data.capacity(),
         ) {
-            return Err(CoreMLError::UnknownErrorStatic(
-                "failed to bind CVPixelBuffer input to model",
-            ));
+            return Err(CoreMLError::BindInputFailed("CVPixelBuffer"));
         }
         std::mem::forget(data);
         Ok(())
@@ -494,110 +409,58 @@ impl CoreMLModel {
         &mut self,
         allow_empty_shape: bool,
     ) -> Result<(bool, Vec<(String, Vec<usize>, String)>), CoreMLError> {
-        let cached_use_backing = if allow_empty_shape {
-            self.use_output_backing_with_state
-        } else {
-            self.use_output_backing
-        };
-
-        // ⚡ Maxima: Zero-cost setup backing logic.
-        // We refuse to clone the `output_info` vector containing strings and vecs on the hot path
-        // just to circumvent the borrow checker. We separate the iteration from the mutation.
-        if let Some(use_backing) = cached_use_backing {
-            if use_backing {
-                for i in 0..self.output_info.len() {
-                    let (name, output_shape, ty) = {
-                        let info = &self.output_info[i];
-                        (info.0.clone(), info.1.clone(), info.2.clone())
-                    };
-                    match ty.as_str() {
-                        "f32" => {
-                            if !self.add_output_f32(&name, Array::<f32, _>::zeros(output_shape)) {
-                                return Err(CoreMLError::UnknownError(format!(
-                                    "failed to bind f32 output '{}'",
-                                    name
-                                )));
-                            }
-                        }
-                        "f16" | "float16" => {
-                            if !self.add_output_u16(&name, Array::<u16, _>::zeros(output_shape)) {
-                                return Err(CoreMLError::UnknownError(format!(
-                                    "failed to bind f16 output '{}'",
-                                    name
-                                )));
-                            }
-                        }
-                        "int32" | "int64" | "int16" | "uint32" | "uint64" | "uint16" => {
-                            if !self.add_output_i32(&name, Array::<i32, _>::zeros(output_shape)) {
-                                return Err(CoreMLError::UnknownError(format!(
-                                    "failed to bind i32 output '{}'",
-                                    name
-                                )));
-                            }
-                        }
-                        "bool" | "boolean" => {
-                            if !self.add_output_f32(&name, Array::<f32, _>::zeros(output_shape)) {
-                                return Err(CoreMLError::UnknownError(format!(
-                                    "failed to bind bool output '{}'",
-                                    name
-                                )));
-                            }
-                        }
-                        _ => {
-                            return Err(CoreMLError::UnknownErrorStatic(
-                                "non-f32/f16/i32 output types are not supported (yet)!",
-                            ));
-                        }
-                    }
-                }
-            }
-            return Ok((use_backing, self.output_info.clone()));
-        }
-
+        let desc = self.model.description();
         let mut use_output_backing = true;
+        let mut output_info = Vec::new();
 
-        for (_name, output_shape, _ty) in &self.output_info {
+        for name in desc.output_names() {
+            let output_shape = desc.output_shape(name.clone());
+            let ty = desc.output_type(name.clone());
+
             let is_flexible = output_shape.iter().any(|&dim| dim == 0);
             let is_empty = allow_empty_shape && output_shape.is_empty();
             if is_flexible || is_empty {
                 use_output_backing = false;
             }
-        }
-
-        if allow_empty_shape {
-            self.use_output_backing_with_state = Some(use_output_backing);
-        } else {
-            self.use_output_backing = Some(use_output_backing);
+            output_info.push((name, output_shape, ty));
         }
 
         if use_output_backing {
-            for i in 0..self.output_info.len() {
-                let (name, output_shape, ty) = {
-                    let info = &self.output_info[i];
-                    (info.0.clone(), info.1.clone(), info.2.clone())
-                };
+            for (name, output_shape, ty) in &output_info {
                 match ty.as_str() {
                     "f32" => {
-                        self.add_output_f32(name, Array::<f32, _>::zeros(output_shape));
+                        self.add_output_f32(
+                            name.clone(),
+                            Array::<f32, _>::zeros(output_shape.clone()),
+                        );
                     }
                     "f16" | "float16" => {
-                        self.add_output_u16(name, Array::<u16, _>::zeros(output_shape));
+                        self.add_output_u16(
+                            name.clone(),
+                            Array::<u16, _>::zeros(output_shape.clone()),
+                        );
                     }
                     "int32" | "int64" | "int16" | "uint32" | "uint64" | "uint16" => {
-                        self.add_output_i32(name, Array::<i32, _>::zeros(output_shape));
+                        self.add_output_i32(
+                            name.clone(),
+                            Array::<i32, _>::zeros(output_shape.clone()),
+                        );
                     }
                     "bool" | "boolean" => {
-                        self.add_output_f32(name, Array::<f32, _>::zeros(output_shape));
+                        self.add_output_f32(
+                            name.clone(),
+                            Array::<f32, _>::zeros(output_shape.clone()),
+                        );
                     }
                     _ => {
-                        return Err(CoreMLError::UnknownErrorStatic(
+                        return Err(CoreMLError::UnsupportedOutputType(
                             "non-f32/f16/i32 output types are not supported (yet)!",
                         ));
                     }
                 }
             }
         }
-        Ok((use_output_backing, self.output_info.clone()))
+        Ok((use_output_backing, output_info))
     }
 
     /// Extract flexible outputs from a CoreML prediction result.
