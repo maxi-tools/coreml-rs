@@ -1,16 +1,10 @@
 use crate::mlarray::MLArrayBaseExt;
 use crate::{
-    ffi::{modelWithAssets, modelWithPath, ComputePlatform, Model, ModelOutput},
+    ffi::{modelWithAssets, modelWithPath, Model, ModelOutput},
     mlarray::MLArray,
-    mlbatchmodel::CoreMLBatchModelWithState,
 };
-use flate2::Compression;
 use ndarray::Array;
-use std::{
-    collections::HashMap,
-    io::{Read, Write},
-    path::{Path, PathBuf},
-};
+use std::{collections::HashMap, io::Write, path::Path};
 use tempfile::NamedTempFile;
 
 pub use crate::swift::MLModelOutput;
@@ -301,64 +295,24 @@ impl CoreMLModel {
         let shape: Vec<usize> = input.shape().to_vec();
         let arr = desc.input_shape(name.clone());
         crate::utils::validate_coreml_shape(&arr, &shape, &name)?;
+        macro_rules! bind_input {
+            ($array_base:ident, $bind_method:ident $(, $cast:ty)?) => {{
+                // Ensure C-contiguous layout before extracting raw data,
+                // since bindInput assumes C-contiguous strides.
+                let mut data = $array_base.into_contiguous_raw_vec();
+                let ptr = data.as_mut_ptr() $(as *mut $cast)?;
+                if !self.model.$bind_method(shape, name.clone(), ptr, data.capacity()) {
+                    return Err(CoreMLError::BindInputFailed(name));
+                }
+                std::mem::forget(data);
+            }};
+        }
+
         match input {
-            MLArray::Float32Array(array_base) => {
-                // Ensure C-contiguous layout before extracting raw data,
-                // since bindInput assumes C-contiguous strides.
-                let mut data = array_base.into_contiguous_raw_vec();
-                if !self
-                    .model
-                    .bindInputF32(shape, name, data.as_mut_ptr(), data.capacity())
-                {
-                    return Err(CoreMLError::UnknownErrorStatic(
-                        "failed to bind input to model",
-                    ));
-                }
-                std::mem::forget(data);
-            }
-            MLArray::Float16Array(array_base) => {
-                // Ensure C-contiguous layout before extracting raw data,
-                // since bindInput assumes C-contiguous strides.
-                let mut data = array_base.into_contiguous_raw_vec();
-                if !self.model.bindInputU16(
-                    shape,
-                    name,
-                    data.as_mut_ptr() as *mut u16,
-                    data.capacity(),
-                ) {
-                    return Err(CoreMLError::UnknownErrorStatic(
-                        "failed to bind input to model",
-                    ));
-                }
-                std::mem::forget(data);
-            }
-            MLArray::Int32Array(array_base) => {
-                // Ensure C-contiguous layout before extracting raw data,
-                // since bindInput assumes C-contiguous strides.
-                let mut data = array_base.into_contiguous_raw_vec();
-                if !self
-                    .model
-                    .bindInputI32(shape, name, data.as_mut_ptr(), data.capacity())
-                {
-                    return Err(CoreMLError::UnknownErrorStatic(
-                        "failed to bind input to model",
-                    ));
-                }
-                std::mem::forget(data);
-            }
-            MLArray::UInt16Array(array_base) => {
-                // UInt16 uses the same Swift binding as Float16 (bindInputU16)
-                let mut data = array_base.into_contiguous_raw_vec();
-                if !self
-                    .model
-                    .bindInputU16(shape, name, data.as_mut_ptr(), data.capacity())
-                {
-                    return Err(CoreMLError::UnknownErrorStatic(
-                        "failed to bind u16 input to model",
-                    ));
-                }
-                std::mem::forget(data);
-            }
+            MLArray::Float32Array(array_base) => bind_input!(array_base, bindInputF32),
+            MLArray::Float16Array(array_base) => bind_input!(array_base, bindInputU16, u16),
+            MLArray::Int32Array(array_base) => bind_input!(array_base, bindInputI32),
+            MLArray::UInt16Array(array_base) => bind_input!(array_base, bindInputU16),
             _ => {
                 return Err(CoreMLError::BadInputShape(format!(
                     "unsupported input type for '{}': only f32, f16, i32, u16, and CVPixelBuffer inputs are supported",
@@ -393,13 +347,11 @@ impl CoreMLModel {
         if !self.model.bindInputCVPixelBuffer(
             width,
             height,
-            name,
+            name.clone(),
             data.as_mut_ptr(),
             data.capacity(),
         ) {
-            return Err(CoreMLError::UnknownErrorStatic(
-                "failed to bind CVPixelBuffer input to model",
-            ));
+            return Err(CoreMLError::BindInputFailed(name));
         }
         std::mem::forget(data);
         Ok(())
@@ -501,7 +453,7 @@ impl CoreMLModel {
                         );
                     }
                     _ => {
-                        return Err(CoreMLError::UnknownErrorStatic(
+                        return Err(CoreMLError::UnsupportedOutputType(
                             "non-f32/f16/i32 output types are not supported (yet)!",
                         ));
                     }

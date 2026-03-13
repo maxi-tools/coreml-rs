@@ -7,13 +7,8 @@ use crate::{
     swift::MLBatchModelOutput,
     CoreMLModelOptions,
 };
-use flate2::Compression;
 use ndarray::Array;
-use std::{
-    collections::HashMap,
-    io::{Read, Write},
-    path::{Path, PathBuf},
-};
+use std::{collections::HashMap, io::Write, path::Path};
 use tempfile::NamedTempFile;
 
 pub use crate::swift::MLModelOutput;
@@ -242,23 +237,29 @@ impl CoreMLBatchModel {
         let shape: Vec<usize> = input.shape().to_vec();
         let arr = desc.input_shape(name.clone());
         crate::utils::validate_coreml_shape(&arr, &shape, &name)?;
+        if idx < 0 || idx >= self.model.description().inputs().len() as isize {
+            // Basic idx check, but note that the maximum batch idx depends on what the user wants to predict.
+            // Usually this will just fail during predict.
+            // We can just rely on the Swift side returning false if it fails, which handles bounds.
+        }
+
         match input {
             MLArray::Float32Array(array_base) => {
                 let mut data = array_base.into_contiguous_raw_vec();
+                let ptr = data.as_mut_ptr();
                 if !self
                     .model
-                    .bindInputF32(shape, name, data.as_mut_ptr(), data.capacity(), idx)
+                    .bindInputF32(shape, name.clone(), ptr, data.capacity(), idx)
                 {
-                    return Err(CoreMLError::UnknownErrorStatic(
-                        "failed to bind input to model",
-                    ));
+                    return Err(CoreMLError::BindInputFailed(name));
                 }
                 std::mem::forget(data);
             }
             _ => {
-                return Err(CoreMLError::UnknownErrorStatic(
-                    "failed to bind input to model",
-                ));
+                return Err(CoreMLError::BadInputShape(format!(
+                    "unsupported input type for '{}': only f32 is currently supported in batch mode",
+                    name
+                )));
             }
         }
         Ok(())
@@ -274,7 +275,7 @@ impl CoreMLBatchModel {
                     self.outputs.insert(name, ("f32", shape.to_vec()));
                 }
                 _ => {
-                    return Err(CoreMLError::UnknownErrorStatic(
+                    return Err(CoreMLError::UnsupportedOutputType(
                         "non-f32 output types are not supported (yet)!",
                     ))
                 }

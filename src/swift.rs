@@ -203,36 +203,31 @@ unsafe fn rust_vec_free<T>(ptr: *mut T, len: usize) {
     _ = Vec::from_raw_parts(ptr, len, len);
 }
 
+macro_rules! generate_ffi_vec_helpers {
+    ($($ty:ty => ($from_ptr:ident, $from_ptr_cpy:ident, $free:ident)),* $(,)?) => {
+        $(
+            fn $from_ptr(ptr: *mut $ty, len: usize) -> Vec<$ty> {
+                unsafe { rust_vec_from_ptr(ptr, len) }
+            }
+            // CXX bridge requires *mut; these only read (*mut is implicitly cast to *const at call site)
+            fn $from_ptr_cpy(ptr: *mut $ty, len: usize) -> Vec<$ty> {
+                unsafe { rust_vec_from_ptr_cpy(ptr, len) }
+            }
+            fn $free(ptr: *mut $ty, len: usize) {
+                unsafe { rust_vec_free(ptr, len) }
+            }
+        )*
+    };
+}
+
 // Type-specific wrappers required by the CXX bridge
-fn rust_vec_from_ptr_f32(ptr: *mut f32, len: usize) -> Vec<f32> {
-    unsafe { rust_vec_from_ptr(ptr, len) }
+generate_ffi_vec_helpers! {
+    f32 => (rust_vec_from_ptr_f32, rust_vec_from_ptr_f32_cpy, rust_vec_free_f32),
+    u16 => (rust_vec_from_ptr_u16, rust_vec_from_ptr_u16_cpy, rust_vec_free_u16),
+    i32 => (rust_vec_from_ptr_i32, rust_vec_from_ptr_i32_cpy, rust_vec_free_i32),
 }
-fn rust_vec_from_ptr_u16(ptr: *mut u16, len: usize) -> Vec<u16> {
-    unsafe { rust_vec_from_ptr(ptr, len) }
-}
-fn rust_vec_from_ptr_i32(ptr: *mut i32, len: usize) -> Vec<i32> {
-    unsafe { rust_vec_from_ptr(ptr, len) }
-}
-// CXX bridge requires *mut; these only read (*mut is implicitly cast to *const at call site)
-fn rust_vec_from_ptr_f32_cpy(ptr: *mut f32, len: usize) -> Vec<f32> {
-    unsafe { rust_vec_from_ptr_cpy(ptr, len) }
-}
-fn rust_vec_from_ptr_u16_cpy(ptr: *mut u16, len: usize) -> Vec<u16> {
-    unsafe { rust_vec_from_ptr_cpy(ptr, len) }
-}
-fn rust_vec_from_ptr_i32_cpy(ptr: *mut i32, len: usize) -> Vec<i32> {
-    unsafe { rust_vec_from_ptr_cpy(ptr, len) }
-}
-fn rust_vec_free_f32(ptr: *mut f32, len: usize) {
-    unsafe { rust_vec_free(ptr, len) }
-}
-fn rust_vec_free_u16(ptr: *mut u16, len: usize) {
-    unsafe { rust_vec_free(ptr, len) }
-}
+
 fn rust_vec_free_u8(ptr: *mut u8, len: usize) {
-    unsafe { rust_vec_free(ptr, len) }
-}
-fn rust_vec_free_i32(ptr: *mut i32, len: usize) {
     unsafe { rust_vec_free(ptr, len) }
 }
 
