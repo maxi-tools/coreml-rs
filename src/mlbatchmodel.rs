@@ -230,6 +230,11 @@ impl CoreMLBatchModel {
         input: impl Into<MLArray>,
         idx: isize,
     ) -> Result<(), CoreMLError> {
+        if idx < 0 {
+            return Err(CoreMLError::BadInputShape(format!(
+                "batch index must be non-negative, got {idx}"
+            )));
+        }
         // route input correctly
         let input: MLArray = input.into();
         let name = tag.as_ref().to_string();
@@ -240,38 +245,45 @@ impl CoreMLBatchModel {
         match input {
             MLArray::Float32Array(array_base) => {
                 let mut data = array_base.into_contiguous_raw_vec();
+                let shape_clone = shape.clone();
+                let name_clone = name.clone();
                 if !self
                     .model
                     .bindInputF32(shape, name, data.as_mut_ptr(), data.capacity(), idx)
                 {
-                    return Err(CoreMLError::UnknownErrorStatic(
-                        "failed to bind input to model",
-                    ));
+                    return Err(CoreMLError::BindInputFailed {
+                        name: name_clone,
+                        shape: shape_clone,
+                        dtype: "f32",
+                    });
                 }
                 std::mem::forget(data);
             }
             _ => {
-                return Err(CoreMLError::UnknownErrorStatic(
-                    "failed to bind input to model",
-                ));
+                return Err(CoreMLError::BadInputShape(format!(
+                    "unsupported input type for '{}': only f32 batch inputs are supported",
+                    tag.as_ref()
+                )));
             }
         }
         Ok(())
     }
 
     pub fn predict(&mut self) -> Result<MLBatchModelOutput, CoreMLError> {
-        let desc = self.model.description();
-        for name in desc.output_names() {
-            let shape = desc.output_shape(name.clone());
-            let ty = desc.output_type(name.clone());
-            match ty.as_str() {
-                "f32" => {
-                    self.outputs.insert(name, ("f32", shape.to_vec()));
-                }
-                _ => {
-                    return Err(CoreMLError::UnknownErrorStatic(
-                        "non-f32 output types are not supported (yet)!",
-                    ))
+        if self.outputs.is_empty() {
+            let desc = self.model.description();
+            for name in desc.output_names() {
+                let shape = desc.output_shape(name.clone());
+                let ty = desc.output_type(name.clone());
+                match ty.as_str() {
+                    "f32" => {
+                        self.outputs.insert(name, ("f32", shape.to_vec()));
+                    }
+                    _ => {
+                        return Err(CoreMLError::UnknownErrorStatic(
+                            "non-f32 output types are not supported (yet)!",
+                        ))
+                    }
                 }
             }
         }

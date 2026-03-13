@@ -93,6 +93,12 @@ impl CoreMLModelWithState {
                 Ok(vec) => {
                     let mut coreml_model = CoreMLModel::load_buffer(vec, info.clone());
                     coreml_model.model.load();
+                    if coreml_model.model.failed() {
+                        return Err(CoreMLError::FailedToLoadStatic(
+                            "Failed to load model from cached buffer",
+                            Self::Unloaded(info, CoreMLModelLoader::BufferToDisk(u)),
+                        ));
+                    }
                     let loader = CoreMLModelLoader::BufferToDisk(u);
                     Ok(Self::Loaded(coreml_model, info, loader))
                 }
@@ -299,59 +305,68 @@ impl CoreMLModel {
         crate::utils::validate_coreml_shape(&arr, &shape, &name)?;
         match input {
             MLArray::Float32Array(array_base) => {
-                // Ensure C-contiguous layout before extracting raw data,
-                // since bindInput assumes C-contiguous strides.
                 let mut data = array_base.into_contiguous_raw_vec();
+                let shape_clone = shape.clone();
+                let name_clone = name.clone();
                 if !self
                     .model
                     .bindInputF32(shape, name, data.as_mut_ptr(), data.capacity())
                 {
-                    return Err(CoreMLError::UnknownErrorStatic(
-                        "failed to bind input to model",
-                    ));
+                    return Err(CoreMLError::BindInputFailed {
+                        name: name_clone,
+                        shape: shape_clone,
+                        dtype: "f32",
+                    });
                 }
                 std::mem::forget(data);
             }
             MLArray::Float16Array(array_base) => {
-                // Ensure C-contiguous layout before extracting raw data,
-                // since bindInput assumes C-contiguous strides.
                 let mut data = array_base.into_contiguous_raw_vec();
+                let shape_clone = shape.clone();
+                let name_clone = name.clone();
                 if !self.model.bindInputU16(
                     shape,
                     name,
                     data.as_mut_ptr() as *mut u16,
                     data.capacity(),
                 ) {
-                    return Err(CoreMLError::UnknownErrorStatic(
-                        "failed to bind input to model",
-                    ));
+                    return Err(CoreMLError::BindInputFailed {
+                        name: name_clone,
+                        shape: shape_clone,
+                        dtype: "f16",
+                    });
                 }
                 std::mem::forget(data);
             }
             MLArray::Int32Array(array_base) => {
-                // Ensure C-contiguous layout before extracting raw data,
-                // since bindInput assumes C-contiguous strides.
                 let mut data = array_base.into_contiguous_raw_vec();
+                let shape_clone = shape.clone();
+                let name_clone = name.clone();
                 if !self
                     .model
                     .bindInputI32(shape, name, data.as_mut_ptr(), data.capacity())
                 {
-                    return Err(CoreMLError::UnknownErrorStatic(
-                        "failed to bind input to model",
-                    ));
+                    return Err(CoreMLError::BindInputFailed {
+                        name: name_clone,
+                        shape: shape_clone,
+                        dtype: "i32",
+                    });
                 }
                 std::mem::forget(data);
             }
             MLArray::UInt16Array(array_base) => {
-                // UInt16 uses the same Swift binding as Float16 (bindInputU16)
                 let mut data = array_base.into_contiguous_raw_vec();
+                let shape_clone = shape.clone();
+                let name_clone = name.clone();
                 if !self
                     .model
                     .bindInputU16(shape, name, data.as_mut_ptr(), data.capacity())
                 {
-                    return Err(CoreMLError::UnknownErrorStatic(
-                        "failed to bind u16 input to model",
-                    ));
+                    return Err(CoreMLError::BindInputFailed {
+                        name: name_clone,
+                        shape: shape_clone,
+                        dtype: "u16",
+                    });
                 }
                 std::mem::forget(data);
             }

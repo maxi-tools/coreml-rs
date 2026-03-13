@@ -69,10 +69,22 @@ fn compile_swift() {
         cmd.args(["-c", "release"]);
     }
 
-    let child = cmd.spawn().unwrap_or_else(|e| {
-        eprintln!("Failed to spawn swift build command: {}", e);
-        std::process::exit(1);
-    });
+    if std::env::var("COREML_RS_SKIP_SWIFT").as_deref() == Ok("1") {
+        eprintln!("COREML_RS_SKIP_SWIFT=1: skipping Swift compilation");
+        return;
+    }
+
+    let child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("Swift compiler not found, skipping Swift compilation");
+            return;
+        }
+        Err(e) => {
+            eprintln!("Failed to spawn swift build command: {}", e);
+            std::process::exit(1);
+        }
+    };
     let exit_status = child.wait_with_output().unwrap_or_else(|e| {
         eprintln!("Failed to wait for swift build: {}", e);
         std::process::exit(1);
