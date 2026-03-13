@@ -57,7 +57,6 @@ impl CoreMLBatchModelWithState {
                         Self::Unloaded(info, loader),
                     ));
                 }
-                coreml_model.init_caches();
                 Ok(Self::Loaded(coreml_model, info, loader))
             }
             CoreMLModelLoader::CompiledPath(path_buf) => {
