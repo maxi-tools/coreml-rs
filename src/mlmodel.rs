@@ -117,12 +117,14 @@ impl CoreMLModelWithState {
                         CoreMLModelLoader::Buffer(res)
                     }
                     CoreMLModelLoader::ModelPath(p) => {
-                        // Prefer compiled path for faster reload, fall back to original model path
-                        if let Some(path) = model.model.compiled_path() {
-                            CoreMLModelLoader::CompiledPath(path.into())
-                        } else {
-                            CoreMLModelLoader::ModelPath(p)
-                        }
+                        // if the model is loaded from modelPath it has to have compiled path
+                        let path = model.model.compiled_path().ok_or_else(|| {
+                            CoreMLError::UnknownError(format!(
+                                "Compiled path missing for model loaded from {:?}",
+                                p
+                            ))
+                        })?;
+                        CoreMLModelLoader::CompiledPath(path.into())
                     }
                     x => x,
                 },

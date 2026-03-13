@@ -63,9 +63,6 @@ pub fn mean_absolute_error<
         .zip(rhs.as_ref())
         .map(|(&l, &r)| if l > r { l - r } else { r - l })
         .fold((0f64, 0usize), |(acc, count), x| (acc + x.as_(), count + 1));
-    if count == 0 {
-        return 0.0;
-    }
     sum / count as f64
 }
 
@@ -120,10 +117,7 @@ impl<T: MLType> From<ArrayBase<OwnedRepr<T>, Dim<IxDynImpl>>> for MLArray {
                 TY_I16 => MLArray::Int16Array(std::mem::transmute(value)),
                 TY_I8 => MLArray::Int8Array(std::mem::transmute(value)),
                 TY_U32 => MLArray::UInt32Array(std::mem::transmute(value)),
-                _ => unreachable!(
-                    "unsupported MLType type_id={} — add a variant to MLArray and a TY_ constant",
-                    T::TY
-                ),
+                _ => unreachable!("Only explicitly supported MLTypes can trigger this"),
             }
         }
     }
@@ -155,8 +149,8 @@ impl MLArray {
         let expected = T::TY;
         if actual != expected {
             return Err(format!(
-                "MLArray type mismatch: expected type_id={}, found type_id={}",
-                expected, actual
+                "MLArray type mismatch: array holds type_id={} but extract requested type_id={}",
+                actual, expected
             ));
         }
         unsafe {
