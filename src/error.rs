@@ -23,6 +23,12 @@ pub enum CoreMLError {
     FailedToLoadBatchStatic(&'static str, CoreMLBatchModelWithState),
     #[error("FailedToLoadBatch: coreml model couldn't be loaded: {0}")]
     FailedToLoadBatch(String, CoreMLBatchModelWithState),
+    #[error("BindInputFailed: input '{name}' ({dtype}) with shape {shape:?} could not be bound")]
+    BindInputFailed {
+        name: String,
+        shape: Vec<usize>,
+        dtype: &'static str,
+    },
 }
 
 #[cfg(test)]
@@ -50,6 +56,16 @@ mod tests {
         assert_eq!(
             err_not_loaded.to_string(),
             "ModelNotLoaded: coreml model not loaded into session"
+        );
+
+        let err_bind = CoreMLError::BindInputFailed {
+            name: "input_ids".to_string(),
+            shape: vec![1, 128],
+            dtype: "f32",
+        };
+        assert_eq!(
+            err_bind.to_string(),
+            "BindInputFailed: input 'input_ids' (f32) with shape [1, 128] could not be bound"
         );
 
         // Construct an IoError to test `From` and `Display`
