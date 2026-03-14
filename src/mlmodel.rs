@@ -262,6 +262,10 @@ pub struct CoreMLModel {
     outputs: HashMap<String, (&'static str, Vec<usize>)>,
 }
 
+// SAFETY: CoreML MLModel is thread-safe for prediction after compilation.
+// The Swift bridge Model wrapper contains raw pointers (not auto-Send),
+// but the underlying CoreML runtime is safe to use from any thread.
+// See: https://developer.apple.com/documentation/coreml/mlmodel
 unsafe impl Send for CoreMLModel {}
 
 impl std::fmt::Debug for Model {
@@ -279,6 +283,10 @@ impl CoreMLModel {
     }
 
     pub fn load_buffer(mut buf: Vec<u8>, info: CoreMLModelInfo) -> Self {
+        // Guarantee capacity == len. The Swift deallocator reconstructs a Vec
+        // with (ptr, len, len) — if capacity > len, those bytes leak (#987).
+        // shrink_to_fit() is only a hint; into_boxed_slice() guarantees it.
+        let mut buf = buf.into_boxed_slice().into_vec();
         let coreml_model = Self {
             model: modelWithAssets(
                 buf.as_mut_ptr(),
