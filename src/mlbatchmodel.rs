@@ -216,6 +216,9 @@ impl CoreMLBatchModel {
     }
 
     pub fn load_buffer(mut buf: Vec<u8>, info: CoreMLModelInfo) -> Self {
+        // Shrink to fit so capacity == len. The Swift deallocator reconstructs
+        // a Vec with (ptr, len, len) — if capacity > len, those bytes leak (#987).
+        buf.shrink_to_fit();
         let coreml_model = Self {
             model: modelWithAssetsBatch(
                 buf.as_mut_ptr(),
