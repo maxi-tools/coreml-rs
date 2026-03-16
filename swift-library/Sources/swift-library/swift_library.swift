@@ -679,6 +679,7 @@ class Model: @unchecked Sendable {
 				} else {
 					outputs = self.outputs
 				}
+				self.previousOutputBackings = self.outputs
 				self.outputs = [:]
 				self.dict = [:]
 				return ModelOutput(output: outputs, error: nil, cpy: true)
@@ -795,6 +796,10 @@ class Model: @unchecked Sendable {
 		}
 	}
 
+		// Keep previous output backings alive until next prediction to prevent
+	// ANE use-after-free (ANE may still be writing when prediction() returns)
+	var previousOutputBackings: [String: Any] = [:]
+
 	func predict() -> ModelOutput {
 		if hasFailedToLoad() {
 			return ModelOutput(
@@ -806,7 +811,7 @@ class Model: @unchecked Sendable {
 			opts.outputBackings = self.outputs
 
 			let result = try self.model!.prediction(from: input, options: opts)
-			
+
 			// If we have output backings, use them
 			let outputs: [String: Any]
 			if self.outputs.isEmpty {
@@ -818,7 +823,10 @@ class Model: @unchecked Sendable {
 				// Use output backing
 				outputs = self.outputs
 			}
-			
+
+			// Keep previous backings alive until they've been fully read by Rust.
+			// ANE writes may still be in-flight when prediction() returns.
+			self.previousOutputBackings = self.outputs
 			self.outputs = [:]
 			self.dict = [:]
 			// Use cpy=true to safely copy data from MLFeatureValue outputs
@@ -929,11 +937,11 @@ class Model: @unchecked Sendable {
 			// Create CVPixelBuffer from raw BGRA data
 			var pixelBuffer: CVPixelBuffer? = nil
 			let bytesPerRow = width * 4  // 4 bytes per pixel (BGRA)
-			
+
 			// Create a context to hold the length
 			let contextPtr = UnsafeMutablePointer<UInt>.allocate(capacity: 1)
 			contextPtr.pointee = len
-			
+
 			// Create pixel buffer with the provided data
 			let status = CVPixelBufferCreateWithBytes(
 				nil,
@@ -956,13 +964,13 @@ class Model: @unchecked Sendable {
 				nil,
 				&pixelBuffer
 			)
-			
+
 			guard status == kCVReturnSuccess, let pixelBuffer = pixelBuffer else {
 				print("Failed to create CVPixelBuffer: \(status)")
 				contextPtr.deallocate()
 				return false
 			}
-			
+
 			let value = MLFeatureValue(pixelBuffer: pixelBuffer)
 			self.dict[featureName.toString()] = value
 			return true
