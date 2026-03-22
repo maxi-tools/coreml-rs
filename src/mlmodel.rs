@@ -173,6 +173,23 @@ impl CoreMLModelWithState {
         }
     }
 
+    pub fn input_shape(&self, name: &str) -> Option<Vec<usize>> {
+        match self {
+            CoreMLModelWithState::Unloaded(_, _) => None,
+            CoreMLModelWithState::Loaded(core_mlmodel, _, _) => {
+                let shape = core_mlmodel
+                    .model
+                    .description()
+                    .input_shape(name.to_string());
+                if shape.is_empty() {
+                    None
+                } else {
+                    Some(shape)
+                }
+            }
+        }
+    }
+
     pub fn add_input(
         &mut self,
         tag: impl AsRef<str>,
