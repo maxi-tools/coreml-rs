@@ -1,22 +1,26 @@
-## Core-ML Rust Bindings (Work in Progress)
+## Core-ML Rust Bindings
 
-`coreml-rs` is an experimental Rust library aimed at providing Rust bindings for Apple's Core ML framework.
-Core ML is Apple's machine learning framework designed to integrate machine learning models into iOS, macOS, watchOS, and tvOS applications.
+`coreml-rs` is a high-performance Rust library providing safe bindings for Apple's Core ML framework. It enables Rust developers to load and run Core ML models (`.mlmodel`, `.mlpackage`) on iOS, macOS, watchOS, and tvOS with full support for neural engine (ANE) acceleration and batch inference.
 
-### NOTES:
+Built using `swift-bridge` for zero-copy interop and backed by `bytemuck`/`half` for efficient data layout.
 
-`libswift_Concurrency.dylib` is required for the builds to work, put the dylib next to the built binary to run the process.
+### Key Features
 
-## Status
+- **Safety Fixes** (Recent): ANE output backing use-after-free fix, buffer capacity leak fix for improved memory safety
+- **Inference**: Single and batch inference with configurable compute platforms (CPU, GPU, ANE)
+- **Input Introspection**: New `input_shape()` API to query model input dimensions at runtime
+- **Model Loading**: From binary buffers or zip archives containing `.mlpackage` files
+- **Data Handling**: `ndarray` integration for flexible tensor I/O
 
-This project is currently work in progress.
-The primary goal is to enable Rust developers to utilize Core ML models within their applications, leveraging Rust's performance and safety features for the rest of the ML infrastructure.
+### Status
+
+Production-ready for macOS/iOS inference. Core API stable. Recent focus on safety audits and comprehensive E2E testing.
 
 ## Roadmap
 
-- Cleanup & fix bugs with the types and allow more input formats.
-- Build zerocopy types for more efficiently passing inputs and outputs.
-- Provide more configuration options for models.
+- Expand input format support (image preprocessing pipelines)
+- Zerocopy tensor types for zero-allocation inference
+- Advanced configuration (caching, priority settings)
 
 ## Features
 
@@ -24,15 +28,52 @@ The primary goal is to enable Rust developers to utilize Core ML models within t
 - **Inference**: Perform inference using loaded models.
 - **Data Handling**: Manage input and output data for model inference.
 
-## Installation
+## Installation & Prerequisites
 
-To include `coreml-rs` in your project, add the following to your `Cargo.toml` dependencies:
+### Requirements
+
+- **Swift Runtime**: `libswift_Concurrency.dylib` must be available. Place it alongside the built binary or in the system library path.
+- **Platforms**: macOS 11.0+ for building; iOS 14.0+ for target deployment
+- **Rust**: 1.70+ (MSRV tested via CI)
+
+### Setup
+
 ```toml
 [dependencies]
-coreml-rs = { version = "0.4", git = "https://github.com/swarnimarun/coreml-rs" }
+coreml-rs = { version = "0.5", git = "https://github.com/maxi-tools/coreml-rs" }
+ndarray = "0.16"
 ```
 
-## Usage
+Build with:
+```bash
+cargo build --release
+# Ensure libswift_Concurrency.dylib is in target/release/ or LD_LIBRARY_PATH
+```
+
+## API Overview
+
+### Core Types
+
+| Type | Purpose |
+|------|---------|
+| `CoreMLModelWithState` | Single-instance model for straightforward inference |
+| `CoreMLBatchModelWithState` | Batch-optimized model for processing multiple inputs |
+| `ComputePlatform` | Enum: `CpuAndAne`, `CpuAndGpu`, `All` |
+| `MLArray` | Wrapper around model output dictionaries |
+
+### `input_shape()` — New in 0.5.5
+
+Query input tensor dimensions without running inference:
+
+```rust
+let model = CoreMLModelWithState::from_buf(buf, options);
+let (batch, height, width, channels) = model.input_shape("image")?;
+println!("Input shape: {}x{}x{}x{}", batch, height, width, channels);
+```
+
+Useful for validating inputs before prediction or preallocating buffers.
+
+## Usage Examples
 
 ### Simple Inference
 
@@ -212,7 +253,50 @@ pub fn main() {
 
 **Note**: These examples assume specific model inputs/outputs. Adjust based on your model's specifications.
 
+---
+
+## Testing
+
+Run the test suite (requires valid `.mlmodel` artifacts):
+
+```bash
+cargo test --lib
+cargo test --test load
+cargo test --test mlarray_types
+```
+
+### E2E Scenarios
+
+Full-stack integration tests including ANE output backing and buffer lifecycle:
+
+```bash
+cargo nextest run --release
+```
+
+See `tests/` for fixture models and expected behavior around:
+- ANE output handling (use-after-free fixes)
+- Buffer capacity management
+- Input shape queries
+- Batch inference scenarios
+
+---
+
+## Safety & Memory Management
+
+Recent releases (0.5.5+) address:
+- **ANE Output Backing**: Fixed use-after-free when maintaining output buffers across predictions
+- **Buffer Capacity**: Corrected capacity field in loaded buffers to prevent leaks
+- **Safe Send/Sync**: All model types properly gated with `#[derive(Send, Sync)]` guards
+
+All unsafe code is documented with `// SAFETY:` comments and validated by CI. Review `src/mlmodel.rs` for details.
+
+---
+
 ## Contributing
 
-Contributions are welcome!
-If you have experience with Core ML and Rust, consider helping to advance this project.
+Contributions welcome! Areas of focus:
+- Input preprocessing (image normalization pipelines)
+- Performance tuning (Metal shader integration)
+- Extended platform support
+
+See [CLAUDE.md](../CLAUDE.md) in the monorepo for contribution guidelines.
