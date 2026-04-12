@@ -1,6 +1,15 @@
 use std::{path::PathBuf, process::Command};
 
 fn main() {
+    println!("cargo:rerun-if-changed=src/swift.rs");
+    println!("cargo:rerun-if-changed=swift-library/Sources/swift-library");
+    println!("cargo:rerun-if-changed=swift-library/Package.swift");
+
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if !matches!(target_os.as_str(), "macos" | "ios") {
+        return;
+    }
+
     // 1. Use `swift-bridge-build` to generate Swift/C FFI glue.
     //    You can also use the `swift-bridge` CLI.
     let bridge_files = vec!["src/swift.rs"];
@@ -69,22 +78,10 @@ fn compile_swift() {
         cmd.args(["-c", "release"]);
     }
 
-    if std::env::var("COREML_RS_SKIP_SWIFT").as_deref() == Ok("1") {
-        eprintln!("COREML_RS_SKIP_SWIFT=1: skipping Swift compilation");
-        return;
-    }
-
-    let child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("Swift compiler not found, skipping Swift compilation");
-            return;
-        }
-        Err(e) => {
-            eprintln!("Failed to spawn swift build command: {}", e);
-            std::process::exit(1);
-        }
-    };
+    let child = cmd.spawn().unwrap_or_else(|e| {
+        eprintln!("Failed to spawn swift build command: {}", e);
+        std::process::exit(1);
+    });
     let exit_status = child.wait_with_output().unwrap_or_else(|e| {
         eprintln!("Failed to wait for swift build: {}", e);
         std::process::exit(1);

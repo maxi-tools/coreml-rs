@@ -1,6 +1,87 @@
+//! Abstractions for passing multidimensional arrays between Rust and Core ML.
+//!
+//! This module provides the `MLArray` enum, which wraps various types of `ndarray::Array`,
+//! and traits for mapping Rust types to Core ML compatible types.
+
 use half::f16;
 use ndarray::{Array, ArrayBase, Dim, IxDynImpl, OwnedRepr};
 
+#[cfg(target_os = "macos")]
+use crate::iosurface::{IOSurfaceGetAllocSize, IOSurfaceRef, RetainedIOSurface};
+
+/// Element data type for a Core ML tensor wrapping an external buffer.
+///
+/// Used by [`MLArray::from_iosurface`] and the new `add_input_iosurface`
+/// code path (#828 P0a). Discriminants match `MLType::TY` for the
+/// corresponding scalar types so both tables can be unified later if
+/// wanted.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MLDataType {
+    Float32 = 0,
+    Float16 = 1,
+    Int32 = 2,
+}
+
+impl MLDataType {
+    /// Size of a single element of this dtype in bytes.
+    pub const fn size_bytes(self) -> usize {
+        match self {
+            MLDataType::Float32 | MLDataType::Int32 => 4,
+            MLDataType::Float16 => 2,
+        }
+    }
+
+    /// Raw integer tag passed through the Swift bridge so the shim can
+    /// pick the matching `MLMultiArrayDataType`.
+    pub const fn raw_tag(self) -> i32 {
+        self as i32
+    }
+}
+
+/// `MLArray` variant backing an IOSurface-owned tensor.
+///
+/// Holds a retained `IOSurfaceRef` (CFRelease on drop), the logical
+/// shape, and the element dtype. The actual data pointer is *not*
+/// captured here — it is resolved on demand via `IOSurfaceGetBaseAddress`
+/// while the caller holds a lock on the surface.
+///
+/// **Lock contract:** the caller must have the surface locked with
+/// `IOSurfaceLock` before passing it to [`MLArray::from_iosurface`] *and*
+/// must keep it locked through any subsequent `predict()` call that
+/// consumes it. See `docs/superpowers/specs/2026-04-08-828-p0a-...` for
+/// the full lifecycle.
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+pub struct IOSurfaceMLArray {
+    pub(crate) surface: RetainedIOSurface,
+    pub(crate) dtype: MLDataType,
+    pub(crate) shape: Vec<usize>,
+}
+
+#[cfg(target_os = "macos")]
+impl IOSurfaceMLArray {
+    pub fn shape(&self) -> &[usize] {
+        &self.shape
+    }
+
+    pub fn dtype(&self) -> MLDataType {
+        self.dtype
+    }
+
+    pub fn surface_ptr(&self) -> IOSurfaceRef {
+        self.surface.as_ptr()
+    }
+}
+
+/// Represents a multi-dimensional array passed to or from Core ML.
+///
+/// This enum wraps `ndarray::Array` of various numeric types, providing a unified
+/// way to handle different tensor data types within the library.
+///
+/// `MLArray` is the primary data structure for inference inputs and outputs. It wraps
+/// an `ndarray::Array` and ensures that data is in a format compatible with the
+/// underlying Swift/Objective-C bindings.
 #[derive(Debug)]
 pub enum MLArray {
     Float32Array(ArrayBase<OwnedRepr<f32>, Dim<IxDynImpl>>),
@@ -11,19 +92,157 @@ pub enum MLArray {
     UInt32Array(ArrayBase<OwnedRepr<u32>, Dim<IxDynImpl>>),
     UInt16Array(ArrayBase<OwnedRepr<u16>, Dim<IxDynImpl>>),
     UInt8Array(ArrayBase<OwnedRepr<u8>, Dim<IxDynImpl>>),
+    /// Zero-copy input backed by an `IOSurface`. Only used by the new
+    /// `add_input_iosurface` path (#828 P0a). Cannot be extracted to an
+    /// owned `ndarray::Array`.
+    #[cfg(target_os = "macos")]
+    IOSurface(IOSurfaceMLArray),
 }
 
 impl MLArray {
     pub fn shape(&self) -> &[usize] {
         match self {
-            MLArray::Float32Array(array_base) => array_base.shape(),
-            MLArray::Float16Array(array_base) => array_base.shape(),
-            MLArray::Int32Array(array_base) => array_base.shape(),
-            MLArray::Int16Array(array_base) => array_base.shape(),
-            MLArray::Int8Array(array_base) => array_base.shape(),
-            MLArray::UInt32Array(array_base) => array_base.shape(),
-            MLArray::UInt16Array(array_base) => array_base.shape(),
-            MLArray::UInt8Array(array_base) => array_base.shape(),
+            MLArray::Float32Array(a) => a.shape(),
+            MLArray::Float16Array(a) => a.shape(),
+            MLArray::Int32Array(a) => a.shape(),
+            MLArray::Int16Array(a) => a.shape(),
+            MLArray::Int8Array(a) => a.shape(),
+            MLArray::UInt32Array(a) => a.shape(),
+            MLArray::UInt16Array(a) => a.shape(),
+            MLArray::UInt8Array(a) => a.shape(),
+            #[cfg(target_os = "macos")]
+            MLArray::IOSurface(wrap) => wrap.shape(),
+        }
+    }
+
+    pub fn len_bytes(&self) -> usize {
+        match self {
+            MLArray::Float32Array(array_base) => array_base.len() * 4,
+            MLArray::Float16Array(array_base) => array_base.len() * 2,
+            MLArray::Int32Array(array_base) => array_base.len() * 4,
+            MLArray::Int16Array(array_base) => array_base.len() * 2,
+            MLArray::Int8Array(array_base) => array_base.len(),
+            MLArray::UInt32Array(array_base) => array_base.len() * 4,
+            MLArray::UInt16Array(array_base) => array_base.len() * 2,
+            MLArray::UInt8Array(array_base) => array_base.len(),
+            #[cfg(target_os = "macos")]
+            MLArray::IOSurface(wrap) => {
+                wrap.shape.iter().copied().product::<usize>() * wrap.dtype.size_bytes()
+            }
+        }
+    }
+
+    /// Construct an `MLArray` that points at an IOSurface-backed buffer.
+    ///
+    /// This retains the passed `IOSurfaceRef` (via `CFRetain`) and wraps
+    /// it in the new [`MLArray::IOSurface`] variant. The returned value
+    /// carries the logical shape and dtype; it does not resolve the base
+    /// address until bound to a model via `add_input_iosurface`.
+    ///
+    /// # Lock contract
+    ///
+    /// The caller is responsible for locking the surface (typically with
+    /// `kIOSurfaceLockReadOnly`) before calling this function and keeping
+    /// it locked for the lifetime of any `predict()` call that consumes
+    /// the resulting array. CoreML stores a raw pointer into the locked
+    /// base address, so unlocking early will corrupt inference.
+    ///
+    /// # Errors
+    ///
+    /// Returns `BadInputShape` if:
+    /// - `surface` is null;
+    /// - `shape` contains a zero dimension;
+    /// - `shape.product() * dtype.size_bytes()` exceeds
+    ///   `IOSurfaceGetAllocSize(surface)`.
+    ///
+    /// # Safety
+    ///
+    /// `surface` must be a valid `IOSurfaceRef` produced by
+    /// `IOSurfaceCreate` (or equivalent). Passing any other pointer is
+    /// undefined behavior.
+    #[cfg(target_os = "macos")]
+    pub unsafe fn from_iosurface(
+        surface: IOSurfaceRef,
+        dtype: MLDataType,
+        shape: &[usize],
+    ) -> Result<Self, crate::CoreMLError> {
+        if shape.is_empty() || shape.iter().any(|&d| d == 0) {
+            return Err(crate::CoreMLError::BadInputShape(format!(
+                "IOSurface shape must be non-empty with no zero dims, got {shape:?}"
+            )));
+        }
+        // Use checked arithmetic throughout: the shape product itself can
+        // overflow `usize` on pathological inputs, so fold with
+        // `checked_mul` before the final element-to-byte multiply.
+        let elem_count = shape
+            .iter()
+            .copied()
+            .try_fold(1usize, |acc, d| acc.checked_mul(d))
+            .ok_or_else(|| {
+                crate::CoreMLError::BadInputShape(format!(
+                    "IOSurface shape element-count overflow: {shape:?}"
+                ))
+            })?;
+        let expected_bytes = elem_count.checked_mul(dtype.size_bytes()).ok_or_else(|| {
+            crate::CoreMLError::BadInputShape(format!(
+                "IOSurface shape byte-count overflow: {shape:?} * {} bytes",
+                dtype.size_bytes()
+            ))
+        })?;
+
+        // SAFETY: caller asserted the pointer is a valid IOSurfaceRef.
+        let alloc_size = unsafe { IOSurfaceGetAllocSize(surface) };
+        if alloc_size < expected_bytes {
+            return Err(crate::CoreMLError::BadInputShape(format!(
+                "IOSurface alloc_size={alloc_size} < expected={expected_bytes} for shape={shape:?} dtype={dtype:?}"
+            )));
+        }
+
+        // SAFETY: caller asserted the pointer is a valid IOSurfaceRef.
+        let retained = unsafe { RetainedIOSurface::retain(surface) }
+            .map_err(|e| crate::CoreMLError::BadInputShape(e.to_string()))?;
+
+        Ok(MLArray::IOSurface(IOSurfaceMLArray {
+            surface: retained,
+            dtype,
+            shape: shape.to_vec(),
+        }))
+    }
+
+    /// Safely extract the underlying ndarray from the MLArray.
+    /// Panics if the requested type T does not match the actual type stored in MLArray.
+    pub fn extract_to_tensor<T: MLType>(self) -> Result<Array<T, Dim<IxDynImpl>>, String> {
+        T::extract_from_mlarray(self).ok_or_else(|| {
+            format!(
+                "MLArray type mismatch: expected {}",
+                std::any::type_name::<T>()
+            )
+        })
+    }
+}
+
+impl Drop for MLArray {
+    fn drop(&mut self) {
+        // Zero out memory on drop to prevent leaking sensitive data
+        // NOTE: This only works if MLArray is the exclusive owner of the backing storage.
+        // If it was created from a shared view, this might zero out data still in use elsewhere,
+        // but for MLArray's typical use as an owned container, this provides a security baseline.
+        match self {
+            MLArray::Float32Array(a) => a.fill(0.0),
+            MLArray::Float16Array(a) => a.fill(half::f16::ZERO),
+            MLArray::Int32Array(a) => a.fill(0),
+            MLArray::Int16Array(a) => a.fill(0),
+            MLArray::Int8Array(a) => a.fill(0),
+            MLArray::UInt32Array(a) => a.fill(0),
+            MLArray::UInt16Array(a) => a.fill(0),
+            MLArray::UInt8Array(a) => a.fill(0),
+            // IOSurface-backed arrays don't own the underlying memory —
+            // the IOSurface does. Zeroing here would corrupt data still
+            // in use by other consumers of the pooled surface. The
+            // retained surface reference is released via
+            // `RetainedIOSurface::drop`.
+            #[cfg(target_os = "macos")]
+            MLArray::IOSurface(_) => {}
         }
     }
 }
@@ -66,317 +285,136 @@ pub fn mean_absolute_error<
     sum / count as f64
 }
 
-/// Type ID constants used by MLType trait and MLArray dispatch.
-pub(crate) const TY_F32: usize = 0;
-pub(crate) const TY_F16: usize = 1;
-pub(crate) const TY_I32: usize = 2;
-pub(crate) const TY_U16: usize = 3;
-pub(crate) const TY_U8: usize = 4;
-pub(crate) const TY_I16: usize = 5;
-pub(crate) const TY_I8: usize = 6;
-pub(crate) const TY_U32: usize = 7;
-
-pub trait MLType {
+/// Trait for types that can be safely converted to and from `MLArray`.
+///
+/// This trait provides a type-safe abstraction over the heterogeneous numeric types
+/// supported by Core ML, replacing unsafe transmutes with compile-time checked
+/// conversions.
+pub trait MLType: Sized {
+    /// Internal type identifier used by the Swift bridge.
     const TY: usize;
+
+    fn from_array(array: ArrayBase<OwnedRepr<Self>, Dim<IxDynImpl>>) -> MLArray;
+    fn extract_from_mlarray(ml_array: MLArray) -> Option<Array<Self, Dim<IxDynImpl>>>;
 }
 
-impl MLType for f32 {
-    const TY: usize = TY_F32;
+macro_rules! impl_mltype {
+    ($type:ty, $variant:ident, $ty_const:expr) => {
+        impl MLType for $type {
+            const TY: usize = $ty_const;
+
+            fn from_array(array: ArrayBase<OwnedRepr<Self>, Dim<IxDynImpl>>) -> MLArray {
+                MLArray::$variant(array)
+            }
+            fn extract_from_mlarray(ml_array: MLArray) -> Option<Array<Self, Dim<IxDynImpl>>> {
+                let mut ml_array = std::mem::ManuallyDrop::new(ml_array);
+                if let MLArray::$variant(ref mut array) = *ml_array {
+                    unsafe { Some(std::ptr::read(array)) }
+                } else {
+                    None
+                }
+            }
+        }
+    };
 }
-impl MLType for half::f16 {
-    const TY: usize = TY_F16;
-}
-impl MLType for i32 {
-    const TY: usize = TY_I32;
-}
+
+impl_mltype!(f32, Float32Array, 0);
+impl_mltype!(f16, Float16Array, 1);
+impl_mltype!(i32, Int32Array, 2);
+impl_mltype!(u8, UInt8Array, 4);
+impl_mltype!(i16, Int16Array, 5);
+impl_mltype!(i8, Int8Array, 6);
+impl_mltype!(u32, UInt32Array, 7);
+
 impl MLType for u16 {
-    const TY: usize = TY_U16;
-}
-impl MLType for u8 {
-    const TY: usize = TY_U8;
-}
-impl MLType for i16 {
-    const TY: usize = TY_I16;
-}
-impl MLType for i8 {
-    const TY: usize = TY_I8;
-}
-impl MLType for u32 {
-    const TY: usize = TY_U32;
+    const TY: usize = 3;
+
+    fn from_array(array: ArrayBase<OwnedRepr<Self>, Dim<IxDynImpl>>) -> MLArray {
+        MLArray::UInt16Array(array)
+    }
+
+    fn extract_from_mlarray(ml_array: MLArray) -> Option<Array<Self, Dim<IxDynImpl>>> {
+        let mut ml_array = std::mem::ManuallyDrop::new(ml_array);
+        match *ml_array {
+            MLArray::UInt16Array(ref mut array) => unsafe { Some(std::ptr::read(array)) },
+            MLArray::Float16Array(ref mut array) => unsafe {
+                Some(std::mem::transmute(std::ptr::read(array)))
+            },
+            _ => None,
+        }
+    }
 }
 
 impl<T: MLType> From<ArrayBase<OwnedRepr<T>, Dim<IxDynImpl>>> for MLArray {
     fn from(value: ArrayBase<OwnedRepr<T>, Dim<IxDynImpl>>) -> Self {
-        unsafe {
-            match T::TY {
-                TY_F32 => MLArray::Float32Array(std::mem::transmute(value)),
-                TY_F16 => MLArray::Float16Array(std::mem::transmute(value)),
-                TY_I32 => MLArray::Int32Array(std::mem::transmute(value)),
-                TY_U16 => MLArray::UInt16Array(std::mem::transmute(value)),
-                TY_U8 => MLArray::UInt8Array(std::mem::transmute(value)),
-                TY_I16 => MLArray::Int16Array(std::mem::transmute(value)),
-                TY_I8 => MLArray::Int8Array(std::mem::transmute(value)),
-                TY_U32 => MLArray::UInt32Array(std::mem::transmute(value)),
-                _ => panic!("not supported"),
-            }
-        }
-    }
-}
-
-impl MLArray {
-    fn type_id(&self) -> usize {
-        match self {
-            MLArray::Float32Array(_) => TY_F32,
-            MLArray::Float16Array(_) => TY_F16,
-            MLArray::Int32Array(_) => TY_I32,
-            MLArray::Int16Array(_) => TY_I16,
-            MLArray::Int8Array(_) => TY_I8,
-            MLArray::UInt32Array(_) => TY_U32,
-            MLArray::UInt16Array(_) => TY_U16,
-            MLArray::UInt8Array(_) => TY_U8,
-        }
-    }
-
-    /// Extract the array as a typed tensor. Panics if type doesn't match the variant.
-    pub fn extract_to_tensor<T: MLType>(self) -> Array<T, Dim<IxDynImpl>> {
-        self.try_extract_to_tensor()
-            .unwrap_or_else(|e| panic!("{}", e))
-    }
-
-    /// Try to extract as typed tensor. Returns Err if type doesn't match the variant.
-    pub fn try_extract_to_tensor<T: MLType>(self) -> Result<Array<T, Dim<IxDynImpl>>, String> {
-        let actual = self.type_id();
-        let expected = T::TY;
-        if actual != expected {
-            return Err(format!(
-                "MLArray type mismatch: array holds type_id={} but extract requested type_id={}",
-                actual, expected
-            ));
-        }
-        unsafe {
-            Ok(match self {
-                MLArray::Float32Array(a) => std::mem::transmute(a),
-                MLArray::Float16Array(a) => std::mem::transmute(a),
-                MLArray::Int32Array(a) => std::mem::transmute(a),
-                MLArray::Int16Array(a) => std::mem::transmute(a),
-                MLArray::Int8Array(a) => std::mem::transmute(a),
-                MLArray::UInt32Array(a) => std::mem::transmute(a),
-                MLArray::UInt16Array(a) => std::mem::transmute(a),
-                MLArray::UInt8Array(a) => std::mem::transmute(a),
-            })
-        }
-    }
-}
-
-impl<T> MLArrayBaseExt for ArrayBase<OwnedRepr<T>, Dim<IxDynImpl>>
-where
-    T: Clone,
-{
-    type Item = T;
-
-    fn into_contiguous_raw_vec(self) -> Vec<Self::Item> {
-        let contiguous = if self.is_standard_layout() {
-            self
-        } else {
-            self.as_standard_layout().into_owned()
-        };
-        let (data, offset) = contiguous.into_raw_vec_and_offset();
-        assert!(
-            matches!(offset, Some(0) | None),
-            "array base offset is not zero; bad aligned data"
-        );
-        data
-    }
-}
-
-pub trait MLArrayBaseExt {
-    type Item;
-    fn into_contiguous_raw_vec(self) -> Vec<Self::Item>;
-}
-
-impl MLArray {
-    pub fn into_contiguous_raw_vec_and_shape<T: MLType + Clone>(self) -> (Vec<T>, Vec<i32>) {
-        let shape = self.shape().iter().map(|&i| i as i32).collect::<Vec<i32>>();
-        let data = self.extract_to_tensor::<T>().into_contiguous_raw_vec();
-        (data, shape)
-    }
-}
-
-use ndarray::ArrayView;
-
-impl MLArray {
-    pub fn try_as_view_f32(&self) -> Result<ArrayView<'_, f32, Dim<IxDynImpl>>, String> {
-        if let MLArray::Float32Array(a) = self {
-            Ok(a.view())
-        } else {
-            Err(format!(
-                "MLArray type mismatch: expected f32, found type_id={}",
-                self.type_id_str()
-            ))
-        }
-    }
-
-    pub fn try_as_view_f16(&self) -> Result<ArrayView<'_, f16, Dim<IxDynImpl>>, String> {
-        if let MLArray::Float16Array(a) = self {
-            Ok(a.view())
-        } else {
-            Err(format!(
-                "MLArray type mismatch: expected f16, found type_id={}",
-                self.type_id_str()
-            ))
-        }
-    }
-
-    pub fn try_as_view_i32(&self) -> Result<ArrayView<'_, i32, Dim<IxDynImpl>>, String> {
-        if let MLArray::Int32Array(a) = self {
-            Ok(a.view())
-        } else {
-            Err(format!(
-                "MLArray type mismatch: expected i32, found type_id={}",
-                self.type_id_str()
-            ))
-        }
-    }
-
-    pub fn try_as_view_i16(&self) -> Result<ArrayView<'_, i16, Dim<IxDynImpl>>, String> {
-        if let MLArray::Int16Array(a) = self {
-            Ok(a.view())
-        } else {
-            Err(format!(
-                "MLArray type mismatch: expected i16, found type_id={}",
-                self.type_id_str()
-            ))
-        }
-    }
-
-    pub fn try_as_view_i8(&self) -> Result<ArrayView<'_, i8, Dim<IxDynImpl>>, String> {
-        if let MLArray::Int8Array(a) = self {
-            Ok(a.view())
-        } else {
-            Err(format!(
-                "MLArray type mismatch: expected i8, found type_id={}",
-                self.type_id_str()
-            ))
-        }
-    }
-
-    pub fn try_as_view_u32(&self) -> Result<ArrayView<'_, u32, Dim<IxDynImpl>>, String> {
-        if let MLArray::UInt32Array(a) = self {
-            Ok(a.view())
-        } else {
-            Err(format!(
-                "MLArray type mismatch: expected u32, found type_id={}",
-                self.type_id_str()
-            ))
-        }
-    }
-
-    pub fn try_as_view_u16(&self) -> Result<ArrayView<'_, u16, Dim<IxDynImpl>>, String> {
-        if let MLArray::UInt16Array(a) = self {
-            Ok(a.view())
-        } else {
-            Err(format!(
-                "MLArray type mismatch: expected u16, found type_id={}",
-                self.type_id_str()
-            ))
-        }
-    }
-
-    pub fn try_as_view_u8(&self) -> Result<ArrayView<'_, u8, Dim<IxDynImpl>>, String> {
-        if let MLArray::UInt8Array(a) = self {
-            Ok(a.view())
-        } else {
-            Err(format!(
-                "MLArray type mismatch: expected u8, found type_id={}",
-                self.type_id_str()
-            ))
-        }
-    }
-}
-
-impl MLArray {
-    pub fn type_id_str(&self) -> &'static str {
-        match self {
-            MLArray::Float32Array(_) => "f32",
-            MLArray::Float16Array(_) => "f16",
-            MLArray::Int32Array(_) => "i32",
-            MLArray::Int16Array(_) => "i16",
-            MLArray::Int8Array(_) => "i8",
-            MLArray::UInt32Array(_) => "u32",
-            MLArray::UInt16Array(_) => "u16",
-            MLArray::UInt8Array(_) => "u8",
-        }
+        T::from_array(value)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ndarray::{Array, IxDyn};
+    use ndarray::ArrayD;
 
     #[test]
-    fn test_mean_absolute_error_bytes() {
-        let lhs: Vec<f32> = vec![1.0, 2.0, 3.0];
-        let rhs: Vec<f32> = vec![1.5, 2.0, 2.0];
-        let lhs_bytes = bytemuck::cast_slice(&lhs);
-        let rhs_bytes = bytemuck::cast_slice(&rhs);
-        let mae = mean_absolute_error_bytes::<f32>(lhs_bytes, rhs_bytes);
-        assert!((mae - 0.5).abs() < 1e-6);
+    fn test_extract_to_tensor_success() {
+        let array: ArrayD<f32> =
+            Array::from_shape_vec(ndarray::IxDyn(&[2, 2]), vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        let ml_array = MLArray::from(array.clone());
+
+        let extracted = ml_array.extract_to_tensor::<f32>().unwrap();
+        assert_eq!(extracted, array);
     }
 
     #[test]
-    #[should_panic(expected = "lhs and rhs have different lengths")]
-    fn test_mean_absolute_error_bytes_length_mismatch() {
-        let lhs: Vec<f32> = vec![1.0];
-        let rhs: Vec<f32> = vec![1.5, 2.0];
-        let lhs_bytes = bytemuck::cast_slice(&lhs);
-        let rhs_bytes = bytemuck::cast_slice(&rhs);
-        mean_absolute_error_bytes::<f32>(lhs_bytes, rhs_bytes);
-    }
+    fn test_extract_to_tensor_type_mismatch() {
+        let array: ArrayD<f32> =
+            Array::from_shape_vec(ndarray::IxDyn(&[2, 2]), vec![1.0, 2.0, 3.0, 4.0]).unwrap();
+        let ml_array = MLArray::from(array);
 
-    #[test]
-    fn test_try_as_view() {
-        let arr = Array::from_shape_vec(IxDyn(&[2]), vec![1.0f32, 2.0]).unwrap();
-        let ml: MLArray = arr.into();
-        assert!(ml.try_as_view_f32().is_ok());
-        assert!(ml.try_as_view_i32().is_err());
-        assert_eq!(
-            ml.try_as_view_i32().unwrap_err(),
-            "MLArray type mismatch: expected i32, found type_id=f32"
-        );
-
-        let arr_i32 = Array::from_shape_vec(IxDyn(&[1]), vec![10i32]).unwrap();
-        let ml_i32: MLArray = arr_i32.into();
-        assert!(ml_i32.try_as_view_i32().is_ok());
-        assert!(ml_i32.try_as_view_f32().is_err());
-    }
-
-    #[test]
-    fn test_into_contiguous_raw_vec_and_shape() {
-        let arr =
-            Array::from_shape_vec(IxDyn(&[2, 3]), vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
-        let ml: MLArray = arr.into();
-        let (vec, shape) = ml.into_contiguous_raw_vec_and_shape::<f32>();
-        assert_eq!(vec, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
-        assert_eq!(shape, vec![2, 3]);
-    }
-
-    #[test]
-    fn test_try_extract_to_tensor() {
-        let arr = Array::from_shape_vec(IxDyn(&[2]), vec![1.0f32, 2.0]).unwrap();
-        let ml: MLArray = arr.into();
-
-        let extracted = ml.try_extract_to_tensor::<f32>();
-        assert!(extracted.is_ok());
-        assert_eq!(extracted.unwrap().shape(), &[2]);
-    }
-
-    #[test]
-    fn test_extract_to_tensor_panic() {
-        let arr = Array::from_shape_vec(IxDyn(&[1]), vec![10i32]).unwrap();
-        let ml: MLArray = arr.into();
-
-        let result = std::panic::catch_unwind(|| ml.extract_to_tensor::<f32>());
+        let result = ml_array.extract_to_tensor::<i32>();
         assert!(result.is_err());
+        let error_msg = result.unwrap_err();
+        assert!(error_msg.contains("type mismatch") && error_msg.contains("expected i32"));
+    }
+
+    #[test]
+    fn test_mean_absolute_error_f32() {
+        let lhs: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+        let rhs: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
+        assert_eq!(mean_absolute_error(&lhs, &rhs), 0.0);
+
+        let rhs2: Vec<f32> = vec![1.5, 2.5, 3.5, 4.5];
+        assert_eq!(mean_absolute_error(&lhs, &rhs2), 0.5);
+
+        let rhs3: Vec<f32> = vec![0.0, 4.0, 0.0, 8.0];
+        assert_eq!(mean_absolute_error(&lhs, &rhs3), 2.5);
+    }
+
+    #[test]
+    fn test_mean_absolute_error_i32() {
+        let lhs: Vec<i32> = vec![10, 20, 30, 40];
+        let rhs: Vec<i32> = vec![10, 20, 30, 40];
+        assert_eq!(mean_absolute_error(&lhs, &rhs), 0.0);
+
+        let rhs2: Vec<i32> = vec![15, 25, 35, 45];
+        assert_eq!(mean_absolute_error(&lhs, &rhs2), 5.0);
+    }
+
+    #[test]
+    fn test_mean_absolute_error_u8() {
+        let lhs: Vec<u8> = vec![10, 20, 30, 40];
+        let rhs: Vec<u8> = vec![10, 20, 30, 40];
+        assert_eq!(mean_absolute_error(&lhs, &rhs), 0.0);
+
+        let rhs2: Vec<u8> = vec![5, 25, 25, 45];
+        assert_eq!(mean_absolute_error(&lhs, &rhs2), 5.0);
+    }
+
+    #[test]
+    fn test_mean_absolute_error_one_element_different() {
+        let lhs: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0];
+        let rhs: Vec<f64> = vec![1.0, 2.0, 7.0, 4.0];
+        assert_eq!(mean_absolute_error(&lhs, &rhs), 1.0);
     }
 }

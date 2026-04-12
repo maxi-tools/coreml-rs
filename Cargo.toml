@@ -51,6 +51,9 @@ path = "tests/load.rs"
 name = "mlarray_types"
 path = "tests/mlarray_types.rs"
 
+[dependencies]
+fxhash = "0.2.1"
+
 [dependencies.anyhow]
 version = "1"
 features = ["backtrace"]
