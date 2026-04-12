@@ -24,7 +24,7 @@ readme = "README.md"
 license-file = "LICENSE"
 
 [lib]
-name = "coreml_rs"
+name = "coreml_rs_fork"
 path = "src/lib.rs"
 
 [[example]]
