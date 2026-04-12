@@ -1,5 +1,5 @@
 #![allow(clippy::all)]
-use coreml_rs::{CoreMLModelOptions, CoreMLModelWithState};
+use coreml_rs_fork::{CoreMLModelOptions, CoreMLModelWithState};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model_path = "path/to/your/model.mlpackage";

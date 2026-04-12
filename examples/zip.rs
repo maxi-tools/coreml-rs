@@ -1,5 +1,5 @@
 #![allow(clippy::all)]
-use coreml_rs::{ComputePlatform, CoreMLModelOptions, CoreMLModelWithState};
+use coreml_rs_fork::{ComputePlatform, CoreMLModelOptions, CoreMLModelWithState};
 use ndarray::{Array, Array4};
 use std::path::PathBuf;
 

@@ -299,7 +299,7 @@ impl CoreMLModel {
         }
     }
 
-    pub fn load_buffer(mut buf: Vec<u8>, info: CoreMLModelInfo) -> Self {
+    pub fn load_buffer(buf: Vec<u8>, info: CoreMLModelInfo) -> Self {
         // Guarantee capacity == len. The Swift deallocator reconstructs a Vec
         // with (ptr, len, len) — if capacity > len, those bytes leak (#987).
         // shrink_to_fit() is only a hint; into_boxed_slice() guarantees it.

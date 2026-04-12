@@ -2,7 +2,7 @@
 //! Regression tests for MLArray type conversions and contiguity handling.
 //! These tests don't require a CoreML model file.
 
-use coreml_rs::mlarray::{mean_absolute_error, MLArray};
+use coreml_rs_fork::mlarray::{mean_absolute_error, MLArray};
 use ndarray::{Array, Array2, IxDyn};
 
 #[test]

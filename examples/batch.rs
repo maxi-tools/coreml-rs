@@ -1,5 +1,7 @@
 #![allow(clippy::all)]
-use coreml_rs::{mlbatchmodel::CoreMLBatchModelWithState, ComputePlatform, CoreMLModelOptions};
+use coreml_rs_fork::{
+    mlbatchmodel::CoreMLBatchModelWithState, ComputePlatform, CoreMLModelOptions,
+};
 use ndarray::{Array, Array4};
 
 pub fn main() {

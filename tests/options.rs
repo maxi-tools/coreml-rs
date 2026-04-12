@@ -1,4 +1,4 @@
-use coreml_rs::CoreMLModelOptions;
+use coreml_rs_fork::CoreMLModelOptions;
 
 #[test]
 fn test_coreml_model_options_default() {

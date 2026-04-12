@@ -1,7 +1,7 @@
 #![allow(clippy::all)]
 use std::{path::PathBuf, str::FromStr};
 
-use coreml_rs::{mlmodel::CoreMLError, CoreMLModelOptions, CoreMLModelWithState};
+use coreml_rs_fork::{mlmodel::CoreMLError, CoreMLModelOptions, CoreMLModelWithState};
 use sha2::{Digest, Sha256};
 
 #[test]
