@@ -3,7 +3,7 @@ use coreml_rs_fork::CoreMLModelOptions;
 #[test]
 fn test_coreml_model_options_default() {
     let opts = CoreMLModelOptions::default();
-    assert!(matches!(opts.compute_platform, coreml_rs::ffi::ComputePlatform::CpuAndGpu));
+    assert!(matches!(opts.compute_platform, coreml_rs_fork::ffi::ComputePlatform::CpuAndGpu));
     assert_eq!(opts.cache_dir, std::path::PathBuf::default());
 }
 
@@ -19,8 +19,8 @@ fn test_coreml_model_options_custom_cache() {
 #[test]
 fn test_coreml_model_options_cpu_platform() {
     let opts = CoreMLModelOptions {
-        compute_platform: coreml_rs::ffi::ComputePlatform::Cpu,
+        compute_platform: coreml_rs_fork::ffi::ComputePlatform::Cpu,
         ..Default::default()
     };
-    assert!(matches!(opts.compute_platform, coreml_rs::ffi::ComputePlatform::Cpu));
+    assert!(matches!(opts.compute_platform, coreml_rs_fork::ffi::ComputePlatform::Cpu));
 }
