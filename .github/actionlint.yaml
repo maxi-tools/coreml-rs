@@ -1,0 +1,8 @@
+# actionlint configuration.
+# Declares the custom labels of our self-hosted and WarpBuild runner pools so
+# actionlint does not flag them as unknown runner labels.
+self-hosted-runner:
+  labels:
+    - macOS
+    - ARM64
+    - warp-macos-15-arm64-6x
