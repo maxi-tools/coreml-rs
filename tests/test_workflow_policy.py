@@ -34,12 +34,14 @@ class WorkflowPolicyTests(unittest.TestCase):
     def test_qodana_required_check_is_cheap_and_full_scan_is_gated(self) -> None:
         text = QODANA_WORKFLOW.read_text(encoding="utf-8")
 
-        self.assertIn("runs-on: warp-ubuntu-latest-x64-2x", text)
+        self.assertIn("runs-on: ubuntu-latest", text)
         self.assertIn("timeout-minutes: 5", text)
         self.assertIn("Degraded mode merge gate", text)
         self.assertIn("Full Qodana/RustRover scan: advisory unless CI_ENFORCEMENT_MODE", text)
         self.assertIn("qodana-full:", text)
-        self.assertIn("if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'", text)
+        self.assertIn("github.event_name == 'schedule'", text)
+        self.assertIn("github.event_name == 'workflow_dispatch'", text)
+        self.assertIn("vars.CI_ENFORCEMENT_MODE == 'strict'", text)
         self.assertIn("runs-on: [self-hosted, macOS, ram16]", text)
         self.assertIn("GIT_CONFIG_GLOBAL: ${{ runner.temp }}/qodana/.gitconfig-ci", text)
         self.assertIn("Cleanup CI gitconfig", text)

@@ -42,7 +42,7 @@ jobs:
   qodana:
     # Keep the required PR check cheap. The RustRover scan is in qodana-full.
     if: github.event_name == 'pull_request' || github.event_name == 'push'
-    runs-on: warp-ubuntu-latest-x64-2x
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: read
@@ -65,7 +65,7 @@ jobs:
 
       - name: Validate Qodana config (Windows)
         if: runner.os == 'Windows'
-        shell: powershell
+        shell: pwsh
         run: |
           if (Test-Path qodana.yaml) {
             if ((Get-Item qodana.yaml).Length -eq 0) { throw "qodana.yaml is empty" }
@@ -116,7 +116,12 @@ jobs:
           esac
 
   qodana-full:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      (vars.CI_ENFORCEMENT_MODE == 'strict' &&
+        (github.event_name == 'push' ||
+          (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)))
     continue-on-error: ${{ vars.CI_ENFORCEMENT_MODE != 'strict' }}
     runs-on: [self-hosted, macOS, ram16]
     timeout-minutes: 20
