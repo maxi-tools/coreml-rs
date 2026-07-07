@@ -35,8 +35,9 @@ class WorkflowPolicyTests(unittest.TestCase):
         text = QODANA_WORKFLOW.read_text(encoding="utf-8")
 
         self.assertIn("runs-on: warp-ubuntu-latest-x64-2x", text)
-        self.assertIn("timeout-minutes: 2", text)
-        self.assertIn("Full Qodana/RustRover scan runs nightly or via workflow_dispatch.", text)
+        self.assertIn("timeout-minutes: 5", text)
+        self.assertIn("Degraded mode merge gate", text)
+        self.assertIn("Full Qodana/RustRover scan: advisory unless CI_ENFORCEMENT_MODE", text)
         self.assertIn("qodana-full:", text)
         self.assertIn("if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'", text)
         self.assertIn("runs-on: [self-hosted, macOS, ram16]", text)
