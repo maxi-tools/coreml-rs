@@ -19,6 +19,7 @@ class WorkflowPolicyTests(unittest.TestCase):
         self.assertIn("rust-fork:", text)
         self.assertIn("github.event.pull_request.head.repo.full_name == github.repository", text)
         self.assertIn("github.event.pull_request.head.repo.full_name != github.repository", text)
+        self.assertIn("vars.CI_ENFORCEMENT_MODE != 'degraded'", text)
         self.assertIn("runs-on: warp-macos-15-arm64-6x", text)
         self.assertIn("runs-on: macos-latest", text)
         self.assertNotIn("runs-on: [self-hosted, macOS, ARM64]", text)

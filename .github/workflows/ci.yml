@@ -10,7 +10,9 @@ env:
 
 jobs:
   rust:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: >-
+      vars.CI_ENFORCEMENT_MODE != 'degraded' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     # macos-arm64 fallback lane from maxi-config/ci/runner-routing.toml.
     runs-on: warp-macos-15-arm64-6x
     permissions:
@@ -41,7 +43,10 @@ jobs:
 
   rust-fork:
     name: rust-fork
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+    if: >-
+      vars.CI_ENFORCEMENT_MODE != 'degraded' &&
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name != github.repository
     runs-on: macos-latest
     permissions:
       contents: read
