@@ -1,10 +1,13 @@
 # Shared Qodana CI workflow for maxi-tools repos.
-# Source of truth: maxi-config/workflows/qodana.yml
+# Source of truth: maxi-config/.github/workflows/qodana.yml
 
 name: Qodana
 
 on:
   workflow_dispatch:
+  schedule:
+    # Off-hours full scan. PRs get the fast qodana sentinel below.
+    - cron: '17 7 * * *'
   push:
     branches: [master, main]
     paths:
@@ -20,7 +23,7 @@ on:
       - 'qodana.yaml'
 
 concurrency:
-  group: qodana-${{ github.repository }}-${{ github.ref }}
+  group: qodana-${{ github.repository }}-${{ github.ref }}-${{ github.event_name == 'schedule' && 'nightly' || 'interactive' }}
   cancel-in-progress: true
 
 permissions: {}
@@ -31,6 +34,44 @@ env:
 
 jobs:
   qodana:
+    # Keep the required PR check cheap. The RustRover scan is in qodana-full.
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: warp-ubuntu-latest-x64-2x
+    timeout-minutes: 2
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Validate Qodana config (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          if [ -f qodana.yaml ]; then
+            test -s qodana.yaml
+          else
+            echo "qodana.yaml not found; skipping config validation."
+          fi
+
+      - name: Validate Qodana config (Windows)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          if (Test-Path qodana.yaml) {
+            if ((Get-Item qodana.yaml).Length -eq 0) { throw "qodana.yaml is empty" }
+          } else {
+            Write-Host "qodana.yaml not found; skipping config validation."
+          }
+
+      - name: Defer full scan
+        run: echo "Full Qodana/RustRover scan runs nightly or via workflow_dispatch."
+
+  qodana-full:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: [self-hosted, macOS, ram16]
     timeout-minutes: 20
     permissions:
@@ -59,15 +100,18 @@ jobs:
 
       - name: Generate org repo token
         id: app-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
         with:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: maxi-tools
 
       - name: Configure git for private deps
+        # Write the App-token git config under RUNNER_TEMP and remove it in the
+        # always() cleanup step so credentials do not persist on the runner.
         run: |
-          cat > /Users/maxi/.gitconfig-ci <<GITEOF
+          mkdir -p "$RUNNER_TEMP/qodana"
+          cat > "$RUNNER_TEMP/qodana/.gitconfig-ci" <<GITEOF
           [credential]
           helper =
           [url "https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/"]
@@ -75,16 +119,17 @@ jobs:
           insteadOf = "git@github.com:"
           GITEOF
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           token: ${{ steps.app-token.outputs.token }}
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Qodana Scan
         continue-on-error: true
         env:
-          GIT_CONFIG_GLOBAL: /Users/maxi/.gitconfig-ci
+          GIT_CONFIG_GLOBAL: ${{ runner.temp }}/qodana/.gitconfig-ci
           CARGO_TARGET_DIR: ${{ runner.temp }}/qodana/target
           CARGO_HOME: ${{ runner.temp }}/qodana/cargo
         run: |
@@ -139,7 +184,11 @@ jobs:
 
       - name: Upload SARIF to GitHub
         if: always() && steps.qodana_results.outputs.has_sarif == 'true'
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@e8e8e51caba890f74f97e228d00b0b81b666ee4c # v3
         with:
           sarif_file: ${{ runner.temp }}/qodana/results
         continue-on-error: true
+
+      - name: Cleanup CI gitconfig
+        if: always()
+        run: rm -f "$RUNNER_TEMP/qodana/.gitconfig-ci"
