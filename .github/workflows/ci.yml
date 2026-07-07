@@ -1,26 +1,231 @@
+# Shared standard Rust CI workflow for maxi-tools repos.
+# Source of truth: maxi-config/workflows/standard-rust-ci.yml
+#
+# Copy to .github/workflows/ci.yml in simple Rust repos. For repos with custom
+# cross-platform, GUI, release, or hardware behavior, use this as the merge-gate
+# and routing reference rather than replacing repo-specific jobs blindly.
+
 name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
 
 env:
+  CI_ENFORCEMENT_MODE: ${{ vars.CI_ENFORCEMENT_MODE == 'strict' && 'strict' || 'degraded' }}
+  CI_DEGRADED_UNTIL: ${{ vars.CI_DEGRADED_UNTIL || '2026-08-01' }}
   CARGO_TERM_COLOR: always
   CARGO_NET_GIT_FETCH_WITH_CLI: true
 
 jobs:
+  merge-gate:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Report CI enforcement mode
+        run: |
+          set -euo pipefail
+          echo "CI enforcement mode: $CI_ENFORCEMENT_MODE"
+          echo "CI degraded mode expires: $CI_DEGRADED_UNTIL"
+          if [ "$CI_ENFORCEMENT_MODE" = "degraded" ]; then
+            echo "::warning::CI degraded mode is active until $CI_DEGRADED_UNTIL. Heavy Rust checks are advisory so PRs can merge while lab capacity is degraded."
+            today="$(date -u +%Y-%m-%d)"
+            if [ "$today" \> "$CI_DEGRADED_UNTIL" ]; then
+              echo "::error::CI degraded mode expired on $CI_DEGRADED_UNTIL. Restore strict enforcement or extend explicitly with a tracked reason."
+              exit 1
+            fi
+          elif [ "$CI_ENFORCEMENT_MODE" != "strict" ]; then
+            echo "::error::Unknown CI_ENFORCEMENT_MODE=$CI_ENFORCEMENT_MODE"
+            exit 1
+          fi
+
+  plan-rust:
+    if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && (vars.CI_ENFORCEMENT_MODE == 'strict' || contains(github.event.pull_request.labels.*.name, 'run-ci') || contains(github.event.pull_request.labels.*.name, 'run-clippy'))) }}
+    runs-on: warp-ubuntu-latest-x64-2x
+    outputs:
+      matrix: ${{ steps.final.outputs.matrix }}
+      scope: ${{ steps.final.outputs.scope }}
+      full_build_required: ${{ steps.final.outputs.full-build-required }}
+      release_affected: ${{ steps.final.outputs.release-affected }}
+      recommended_lane: ${{ steps.final.outputs.recommended-lane }}
+      feature_sets: ${{ steps.final.outputs.feature-sets }}
+      planner_scope: ${{ steps.final.outputs.scope }}
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Collect changed files
+        id: files
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            files="$(gh api --paginate "repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/files" --jq '.[].filename')"
+          else
+            files="Cargo.lock"
+          fi
+          delimiter="CI_PLANNER_CHANGED_FILES_$(uuidgen)"
+          {
+            echo "changed_files<<$delimiter"
+            printf '%s\n' "$files"
+            echo "$delimiter"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Generate org repo token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: maxi-tools
+
+      - name: Checkout planner policy
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: maxi-tools/maxi-config
+          path: .maxi-config
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
+
+      - name: Plan Rust CI matrix
+        id: plan
+        uses: ./.maxi-config/.github/actions/ci-planner
+        continue-on-error: true
+        with:
+          changed-files: ${{ steps.files.outputs.changed_files }}
+          repo: ${{ github.event.repository.name }}
+          workflow-family: rust
+
+      - name: Finalize Rust CI matrix
+        id: final
+        if: ${{ always() }}
+        shell: bash
+        env:
+          PLAN_OUTCOME: ${{ steps.plan.outcome }}
+          PLAN_MATRIX: ${{ steps.plan.outputs.matrix }}
+          PLAN_SCOPE: ${{ steps.plan.outputs.scope }}
+          PLAN_FULL_BUILD_REQUIRED: ${{ steps.plan.outputs.full-build-required }}
+          PLAN_RELEASE_AFFECTED: ${{ steps.plan.outputs.release-affected }}
+          PLAN_RECOMMENDED_LANE: ${{ steps.plan.outputs.recommended-lane }}
+          PLAN_FEATURE_SETS: ${{ steps.plan.outputs.feature-sets }}
+        run: |
+          set -euo pipefail
+          matrix="$PLAN_MATRIX"
+          scope="$PLAN_SCOPE"
+          full_build_required="$PLAN_FULL_BUILD_REQUIRED"
+          release_affected="$PLAN_RELEASE_AFFECTED"
+          recommended_lane="$PLAN_RECOMMENDED_LANE"
+          feature_sets="$PLAN_FEATURE_SETS"
+          if [ "$PLAN_OUTCOME" != "success" ] || [ -z "$matrix" ]; then
+            matrix='{"include":[{"package":"workspace","feature_set":"default","platform":"linux"},{"package":"workspace","feature_set":"minimal","platform":"linux"},{"package":"workspace","feature_set":"all-features","platform":"linux"}]}'
+            scope="full"
+            full_build_required="true"
+            release_affected="false"
+            recommended_lane="linux-x64"
+            feature_sets='["default","minimal","all-features"]'
+          fi
+          {
+            echo "matrix=$matrix"
+            echo "scope=$scope"
+            echo "full-build-required=$full_build_required"
+            echo "release-affected=$release_affected"
+            echo "recommended-lane=$recommended_lane"
+            echo "feature-sets=$feature_sets"
+          } >> "$GITHUB_OUTPUT"
+
+  route-rust:
+    if: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && (vars.CI_ENFORCEMENT_MODE == 'strict' || contains(github.event.pull_request.labels.*.name, 'run-ci') || contains(github.event.pull_request.labels.*.name, 'run-clippy'))) }}
+    runs-on: warp-ubuntu-latest-x64-2x
+    outputs:
+      runs_on: ${{ steps.resolve.outputs.runs-on }}
+      provider: ${{ steps.resolve.outputs.provider }}
+      reason: ${{ steps.resolve.outputs.reason }}
+      tier: ${{ steps.resolve.outputs.tier }}
+      cost_tier: ${{ steps.resolve.outputs.cost_tier }}
+      budget_status: ${{ steps.budget.outputs.status }}
+      budget_reason: ${{ steps.budget.outputs.reason }}
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Generate org repo token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: maxi-tools
+
+      - name: Checkout routing policy
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: maxi-tools/maxi-config
+          path: .maxi-config
+          sparse-checkout: |
+            .github/actions/resolve-runner
+            .github/actions/check-budget
+            ci/runner-routing.toml
+            ci/ci-budgets.toml
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
+
+      - name: Resolve runner
+        id: resolve
+        uses: ./.maxi-config/.github/actions/resolve-runner
+        with:
+          lane: linux-x64
+          repo: ${{ github.event.repository.name }}
+          job: rust
+          policy-path: .maxi-config/ci/runner-routing.toml
+          github-token: ${{ steps.app-token.outputs.token }}
+
+      - name: Check CI budget
+        id: budget
+        uses: ./.maxi-config/.github/actions/check-budget
+        with:
+          repo: ${{ github.event.repository.name }}
+          job: rust
+          budget: rust-standard
+          runner-tier: standard
+          policy-path: .maxi-config/ci/ci-budgets.toml
+          github-token: ${{ steps.app-token.outputs.token }}
+
   rust:
-    if: >-
-      vars.CI_ENFORCEMENT_MODE != 'degraded' &&
-      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-    # macos-arm64 fallback lane from maxi-config/ci/runner-routing.toml.
-    runs-on: warp-macos-15-arm64-6x
+    if: ${{ (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && (vars.CI_ENFORCEMENT_MODE == 'strict' || contains(github.event.pull_request.labels.*.name, 'run-ci') || contains(github.event.pull_request.labels.*.name, 'run-clippy')))) && needs.plan-rust.outputs.scope != 'merge-gate-only' }}
+    needs: [plan-rust, route-rust]
+    runs-on: ${{ fromJSON(needs.route-rust.outputs.runs_on) }}
+    continue-on-error: ${{ github.event_name == 'pull_request' && vars.CI_ENFORCEMENT_MODE != 'strict' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan-rust.outputs.matrix) }}
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+
+      - name: Generate org repo token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        id: app-token
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: maxi-tools
+
+      - name: Configure git for private deps
+        run: |
+          cat > "$HOME/.gitconfig-ci" <<GITEOF
+          [url "https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/"]
+            insteadOf = https://github.com/
+          GITEOF
+          echo "GIT_CONFIG_GLOBAL=$HOME/.gitconfig-ci" >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
         # Pinned from dtolnay/rust-toolchain stable.
@@ -32,44 +237,57 @@ jobs:
         # Pinned from Swatinem/rust-cache v2.
         uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
 
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Build checks
-        run: cargo check --workspace --all-targets
-
-      - name: Lint
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-  rust-fork:
-    name: rust-fork
-    if: >-
-      vars.CI_ENFORCEMENT_MODE != 'degraded' &&
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.head.repo.full_name != github.repository
-    runs-on: macos-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          persist-credentials: false
-
-      - name: Install Rust toolchain
-        # Pinned from dtolnay/rust-toolchain stable.
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
-        with:
-          components: rustfmt, clippy
-
-      - name: Cache Rust dependencies
-        # Pinned from Swatinem/rust-cache v2.
-        uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+      - name: Planner summary
+        run: |
+          {
+            echo "## Planner summary"
+            echo "- Scope: ${{ needs.plan-rust.outputs.scope }}"
+            echo "- Full build required: ${{ needs.plan-rust.outputs.full_build_required }}"
+            echo "- Release affected: ${{ needs.plan-rust.outputs.release_affected }}"
+            echo "- Matrix package: ${{ matrix.package }}"
+            echo "- Matrix feature set: ${{ matrix.feature_set }}"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Resolve feature flags
+        id: feature-flags
+        shell: bash
+        run: |
+          case "${{ matrix.feature_set }}" in
+            default) ;;
+            minimal) echo "args=--no-default-features" >> "$GITHUB_OUTPUT" ;;
+            all-features) echo "args=--all-features" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::unknown feature set ${{ matrix.feature_set }}"; exit 1 ;;
+          esac
+
       - name: Build checks
-        run: cargo check --workspace --all-targets
+        shell: bash
+        env:
+          CARGO_FEATURE_ARGS: ${{ steps.feature-flags.outputs.args }}
+        run: |
+          feature_args=()
+          if [ -n "$CARGO_FEATURE_ARGS" ]; then
+            feature_args=("$CARGO_FEATURE_ARGS")
+          fi
+          if [ "${{ matrix.package }}" = "workspace" ]; then
+            cargo check --workspace --all-targets "${feature_args[@]}"
+          else
+            cargo check -p "${{ matrix.package }}" --all-targets "${feature_args[@]}"
+          fi
 
       - name: Lint
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        shell: bash
+        env:
+          CARGO_FEATURE_ARGS: ${{ steps.feature-flags.outputs.args }}
+        run: |
+          feature_args=()
+          if [ -n "$CARGO_FEATURE_ARGS" ]; then
+            feature_args=("$CARGO_FEATURE_ARGS")
+          fi
+          if [ "${{ matrix.package }}" = "workspace" ]; then
+            cargo clippy --workspace --all-targets "${feature_args[@]}" -- -D warnings
+          else
+            cargo clippy -p "${{ matrix.package }}" --all-targets "${feature_args[@]}" -- -D warnings
+          fi
