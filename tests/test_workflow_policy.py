@@ -16,19 +16,28 @@ class WorkflowPolicyTests(unittest.TestCase):
         text = CI_WORKFLOW.read_text(encoding="utf-8")
 
         self.assertIn("rust:", text)
-        self.assertIn("rust-fork:", text)
+        self.assertIn("rust-fork-linux:", text)
+        self.assertIn("rust-fork-macos:", text)
         self.assertIn("github.event.pull_request.head.repo.full_name == github.repository", text)
         self.assertIn("github.event.pull_request.head.repo.full_name != github.repository", text)
-        self.assertIn("vars.CI_ENFORCEMENT_MODE != 'degraded'", text)
-        self.assertIn("runs-on: warp-macos-15-arm64-6x", text)
+        self.assertIn("vars.CI_ENFORCEMENT_MODE != 'strict'", text)
+        self.assertIn("github.event.action != 'labeled'", text)
+        self.assertIn("[\"run-ci\",\"run-clippy\"]", text)
+        self.assertIn("needs: [plan-rust, route-rust]", text)
+        self.assertIn("runs-on: ${{ fromJSON(needs.route-rust.outputs.runs_on) }}", text)
+        self.assertIn("coreml-rs", text)
         self.assertIn("runs-on: macos-latest", text)
         self.assertNotIn("runs-on: [self-hosted, macOS, ARM64]", text)
 
-    def test_ci_workflow_does_not_persist_org_tokens(self) -> None:
+    def test_ci_workflow_scopes_org_tokens_to_temporary_git_config(self) -> None:
         text = CI_WORKFLOW.read_text(encoding="utf-8")
 
-        self.assertNotIn("APP_PRIVATE_KEY", text)
-        self.assertNotIn("actions/create-github-app-token", text)
+        self.assertIn("actions/create-github-app-token", text)
+        self.assertIn("APP_PRIVATE_KEY", text)
+        self.assertIn("persist-credentials: false", text)
+        self.assertIn("git_config=\"$RUNNER_TEMP/gitconfig-ci\"", text)
+        self.assertIn("GIT_CONFIG_GLOBAL=$git_config", text)
+        self.assertIn("Clean private dependency git config", text)
         self.assertNotIn("git config --global", text)
 
     def test_qodana_required_check_is_cheap_and_full_scan_is_gated(self) -> None:
