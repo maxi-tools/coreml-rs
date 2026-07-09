@@ -8,6 +8,8 @@ pub mod ffi {
         Cpu,
         CpuAndANE,
         CpuAndGpu,
+        /// All available units (CPU + GPU + ANE) — lets the OS place each op.
+        All,
     }
     extern "Rust" {
         fn rust_vec_from_ptr_i32(ptr: *mut i32, len: usize) -> Vec<i32>;

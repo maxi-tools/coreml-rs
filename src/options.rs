@@ -57,6 +57,7 @@ impl std::fmt::Debug for CoreMLModelOptions {
                     ComputePlatform::Cpu => &"CPU",
                     ComputePlatform::CpuAndANE => &"CpuAndAne",
                     ComputePlatform::CpuAndGpu => &"CpuAndGpu",
+                    ComputePlatform::All => &"All",
                 },
             )
             .field(
