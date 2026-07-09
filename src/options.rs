@@ -57,6 +57,7 @@ impl std::fmt::Debug for CoreMLModelOptions {
                     ComputePlatform::Cpu => &"CPU",
                     ComputePlatform::CpuAndANE => &"CpuAndAne",
                     ComputePlatform::CpuAndGpu => &"CpuAndGpu",
+                    ComputePlatform::All => &"All",
                 },
             )
             .field(
@@ -99,5 +100,9 @@ mod tests {
         let opts3 = CoreMLModelOptions::new().with_compute_platform(ComputePlatform::CpuAndGpu);
         let debug_str3 = format!("{:?}", opts3);
         assert!(debug_str3.contains("compute_platform: \"CpuAndGpu\""));
+
+        let opts4 = CoreMLModelOptions::new().with_compute_platform(ComputePlatform::All);
+        let debug_str4 = format!("{:?}", opts4);
+        assert!(debug_str4.contains("compute_platform: \"All\""));
     }
 }

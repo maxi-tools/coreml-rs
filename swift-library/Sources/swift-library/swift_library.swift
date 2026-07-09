@@ -455,21 +455,25 @@ class ModelOutput {
 	}
 }
 
+extension ComputePlatform {
+	var mlComputeUnits: MLComputeUnits {
+		switch self {
+		case .Cpu:
+			return .cpuOnly
+		case .CpuAndANE:
+			return .cpuAndNeuralEngine
+		case .CpuAndGpu:
+			return .cpuAndGPU
+		case .All:
+			return .all
+		}
+	}
+}
+
 func initWithCompiledAsset(
 	ptr: UnsafeMutablePointer<UInt8>, len: Int, compute: ComputePlatform
 ) -> Model {
-	var computeUnits: MLComputeUnits
-	switch compute {
-	case .Cpu:
-		computeUnits = .cpuOnly
-		break
-	case .CpuAndANE:
-		computeUnits = .cpuAndNeuralEngine
-		break
-	case .CpuAndGpu:
-		computeUnits = .cpuAndGPU
-		break
-	}
+	let computeUnits = compute.mlComputeUnits
 	let data = Data.init(
 		bytesNoCopy: ptr, count: len,
 		deallocator: Data.Deallocator.custom { ptr, len in
@@ -489,18 +493,7 @@ func initWithCompiledAsset(
 func initWithCompiledAssetBatch(
 	ptr: UnsafeMutablePointer<UInt8>, len: Int, compute: ComputePlatform
 ) -> BatchModel {
-	var computeUnits: MLComputeUnits
-	switch compute {
-	case .Cpu:
-		computeUnits = .cpuOnly
-		break
-	case .CpuAndANE:
-		computeUnits = .cpuAndNeuralEngine
-		break
-	case .CpuAndGpu:
-		computeUnits = .cpuAndGPU
-		break
-	}
+	let computeUnits = compute.mlComputeUnits
 	let data = Data.init(
 		bytesNoCopy: ptr, count: len,
 		deallocator: Data.Deallocator.custom { ptr, len in
@@ -518,18 +511,7 @@ func initWithCompiledAssetBatch(
 }
 
 func initWithPath(path: RustString, compute: ComputePlatform, compiled: Bool) -> Model {
-	var computeUnits: MLComputeUnits
-	switch compute {
-	case .Cpu:
-		computeUnits = .cpuOnly
-		break
-	case .CpuAndANE:
-		computeUnits = .cpuAndNeuralEngine
-		break
-	case .CpuAndGpu:
-		computeUnits = .cpuAndGPU
-		break
-	}
+	let computeUnits = compute.mlComputeUnits
 	var compiledPath: URL
 	if compiled {
 		compiledPath = URL(fileURLWithPath: path.toString())
@@ -565,18 +547,7 @@ func compileToPath(model: RustString, to: RustString, name: RustString) -> Bool 
 }
 
 func initWithPathBatch(path: RustString, compute: ComputePlatform, compiled: Bool) -> BatchModel {
-	var computeUnits: MLComputeUnits
-	switch compute {
-	case .Cpu:
-		computeUnits = .cpuOnly
-		break
-	case .CpuAndANE:
-		computeUnits = .cpuAndNeuralEngine
-		break
-	case .CpuAndGpu:
-		computeUnits = .cpuAndGPU
-		break
-	}
+	let computeUnits = compute.mlComputeUnits
 	var compiledPath: URL
 	if compiled {
 		compiledPath = URL(fileURLWithPath: path.toString())
