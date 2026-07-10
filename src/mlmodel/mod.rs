@@ -54,7 +54,7 @@ pub fn compute_plan_device_counts(
     compiled_path: impl AsRef<Path>,
     platform: crate::ffi::ComputePlatform,
 ) -> Option<ComputePlanDeviceCounts> {
-    let path = compiled_path.as_ref().to_string_lossy().to_string();
+    let path = compiled_path.as_ref().to_str()?.to_string();
     let counts = crate::ffi::computePlanDeviceCounts(path, platform);
     if counts.len() != 4 {
         return None;
@@ -560,7 +560,14 @@ impl CoreMLModelWithState {
         match self {
             CoreMLModelWithState::Loaded(core_mlmodel, info, _) => {
                 let path = core_mlmodel.model.compiled_path()?;
-                compute_plan_device_counts(path, info.opts.compute_platform)
+                // A prediction-time CPU-only override beats the load-time
+                // compute platform — report what predictions actually use.
+                let platform = if info.opts.prediction_uses_cpu_only == Some(true) {
+                    crate::ffi::ComputePlatform::Cpu
+                } else {
+                    info.opts.compute_platform
+                };
+                compute_plan_device_counts(path, platform)
             }
             _ => None,
         }
