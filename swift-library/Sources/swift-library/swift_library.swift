@@ -526,7 +526,7 @@ func computePlanDeviceCounts(path: RustString, compute: ComputePlatform) -> Rust
 	let units = compute.mlComputeUnits
 	let semaphore = DispatchSemaphore(value: 0)
 	let result = ComputePlanCounts()
-	Task.detached {
+	let task = Task.detached {
 		defer { semaphore.signal() }
 		let config = MLModelConfiguration()
 		config.computeUnits = units
@@ -537,6 +537,7 @@ func computePlanDeviceCounts(path: RustString, compute: ComputePlatform) -> Rust
 			print("[CoreML compute-plan error] \(error)")
 			return
 		}
+		guard !Task.isCancelled else { return }
 		guard case .program(let program) = plan.modelStructure else { return }
 		if let main = program.functions["main"] {
 			tallyBlock(main.block, plan: plan, into: result)
@@ -552,6 +553,7 @@ func computePlanDeviceCounts(path: RustString, compute: ComputePlatform) -> Rust
 	// (Plan loading includes model compilation; large chunks on a busy box
 	// can take minutes.)
 	if semaphore.wait(timeout: .now() + 180) == .timedOut {
+		task.cancel()
 		print("[CoreML compute-plan error] timed out loading plan for \(url.path)")
 		return counts
 	}
