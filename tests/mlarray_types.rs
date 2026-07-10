@@ -10,7 +10,7 @@ fn f32_roundtrip() {
     let arr = Array::from_shape_vec(IxDyn(&[2, 3]), vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
     let ml: MLArray = arr.clone().into();
     assert_eq!(ml.shape(), &[2, 3]);
-    let recovered: Array<f32, _> = ml.extract_to_tensor();
+    let recovered: Array<f32, _> = ml.extract_to_tensor().expect("extract_to_tensor failed");
     assert_eq!(recovered, arr);
 }
 
@@ -19,7 +19,7 @@ fn i32_roundtrip() {
     let arr = Array::from_shape_vec(IxDyn(&[2, 2]), vec![10i32, 20, 30, 40]).unwrap();
     let ml: MLArray = arr.clone().into();
     assert_eq!(ml.shape(), &[2, 2]);
-    let recovered: Array<i32, _> = ml.extract_to_tensor();
+    let recovered: Array<i32, _> = ml.extract_to_tensor().expect("extract_to_tensor failed");
     assert_eq!(recovered, arr);
 }
 
@@ -28,7 +28,7 @@ fn u16_roundtrip() {
     let arr = Array::from_shape_vec(IxDyn(&[3]), vec![100u16, 200, 300]).unwrap();
     let ml: MLArray = arr.clone().into();
     assert_eq!(ml.shape(), &[3]);
-    let recovered: Array<u16, _> = ml.extract_to_tensor();
+    let recovered: Array<u16, _> = ml.extract_to_tensor().expect("extract_to_tensor failed");
     assert_eq!(recovered, arr);
 }
 
@@ -37,7 +37,7 @@ fn u8_roundtrip() {
     let arr = Array::from_shape_vec(IxDyn(&[4]), vec![0u8, 127, 200, 255]).unwrap();
     let ml: MLArray = arr.clone().into();
     assert_eq!(ml.shape(), &[4]);
-    let recovered: Array<u8, _> = ml.extract_to_tensor();
+    let recovered: Array<u8, _> = ml.extract_to_tensor().expect("extract_to_tensor failed");
     assert_eq!(recovered, arr);
 }
 
@@ -46,7 +46,7 @@ fn i16_roundtrip() {
     let arr = Array::from_shape_vec(IxDyn(&[2]), vec![-100i16, 100]).unwrap();
     let ml: MLArray = arr.clone().into();
     assert_eq!(ml.shape(), &[2]);
-    let recovered: Array<i16, _> = ml.extract_to_tensor();
+    let recovered: Array<i16, _> = ml.extract_to_tensor().expect("extract_to_tensor failed");
     assert_eq!(recovered, arr);
 }
 
@@ -55,7 +55,7 @@ fn i8_roundtrip() {
     let arr = Array::from_shape_vec(IxDyn(&[3]), vec![-1i8, 0, 1]).unwrap();
     let ml: MLArray = arr.clone().into();
     assert_eq!(ml.shape(), &[3]);
-    let recovered: Array<i8, _> = ml.extract_to_tensor();
+    let recovered: Array<i8, _> = ml.extract_to_tensor().expect("extract_to_tensor failed");
     assert_eq!(recovered, arr);
 }
 
@@ -64,7 +64,7 @@ fn u32_roundtrip() {
     let arr = Array::from_shape_vec(IxDyn(&[2]), vec![u32::MAX, 0u32]).unwrap();
     let ml: MLArray = arr.clone().into();
     assert_eq!(ml.shape(), &[2]);
-    let recovered: Array<u32, _> = ml.extract_to_tensor();
+    let recovered: Array<u32, _> = ml.extract_to_tensor().expect("extract_to_tensor failed");
     assert_eq!(recovered, arr);
 }
 
@@ -74,7 +74,7 @@ fn f16_roundtrip() {
     let arr = Array::from_shape_vec(IxDyn(&[2]), vals).unwrap();
     let ml: MLArray = arr.clone().into();
     assert_eq!(ml.shape(), &[2]);
-    let recovered: Array<half::f16, _> = ml.extract_to_tensor();
+    let recovered: Array<half::f16, _> = ml.extract_to_tensor().expect("extract_to_tensor failed");
     assert_eq!(recovered, arr);
 }
 

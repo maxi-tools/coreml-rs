@@ -21,7 +21,7 @@ pub fn main() {
 
     let v = output.unwrap();
     for (_out, v) in v.outputs {
-        let _output: Array<f32, _> = v.extract_to_tensor();
+        let _output: Array<f32, _> = v.extract_to_tensor().expect("extract_to_tensor failed");
     }
 
     // Use output as needed
