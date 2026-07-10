@@ -537,6 +537,7 @@ func computePlanDeviceCounts(path: RustString, compute: ComputePlatform) -> Rust
 			print("[CoreML compute-plan error] \(error)")
 			return
 		}
+		guard !Task.isCancelled else { return }
 		guard case .program(let program) = plan.modelStructure else { return }
 		if let main = program.functions["main"] {
 			tallyBlock(main.block, plan: plan, into: result)
@@ -551,9 +552,9 @@ func computePlanDeviceCounts(path: RustString, compute: ComputePlatform) -> Rust
 	// starved — an empty result is a diagnosable failure, a hang is not.
 	// (Plan loading includes model compilation; large chunks on a busy box
 	// can take minutes.)
-		if semaphore.wait(timeout: .now() + 180) == .timedOut {
+	if semaphore.wait(timeout: .now() + 180) == .timedOut {
 		task.cancel()
-		print(\"[CoreML compute-plan error] timed out loading plan for \(url.path)\")
+		print("[CoreML compute-plan error] timed out loading plan for \(url.path)")
 		return counts
 	}
 	if result.loaded {

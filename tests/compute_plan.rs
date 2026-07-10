@@ -11,6 +11,15 @@ fn compute_plan_bogus_path_returns_none() {
 }
 
 #[test]
+fn compute_plan_file_url_bogus_path_returns_none() {
+    let counts = compute_plan_device_counts(
+        "file:///nonexistent/definitely-not-a-model.mlmodelc",
+        ComputePlatform::All,
+    );
+    assert!(counts.is_none());
+}
+
+#[test]
 fn ane_fraction_math() {
     let counts = ComputePlanDeviceCounts {
         total: 10,
