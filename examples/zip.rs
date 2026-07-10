@@ -51,6 +51,6 @@ pub fn main() {
     let output = model.predict().unwrap();
 
     for (_out, v) in output.outputs {
-        let _output: Array<f32, _> = v.extract_to_tensor();
+        let _output: Array<f32, _> = v.extract_to_tensor().expect("extract_to_tensor failed");
     }
 }

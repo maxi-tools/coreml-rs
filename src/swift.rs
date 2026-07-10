@@ -41,6 +41,12 @@ pub mod ffi {
             compute: ComputePlatform,
             compiled: bool,
         ) -> BatchModel;
+        // Compute-plan introspection (MLComputePlan, macOS 14.4+): returns
+        // `[total, ane, gpu, cpu]` preferred-device operation counts for the
+        // compiled model at `path`, or an empty vec when the plan cannot be
+        // loaded (older OS, bad path, non-program model).
+        #[swift_bridge(swift_name = "computePlanDeviceCounts")]
+        pub fn computePlanDeviceCounts(path: String, compute: ComputePlatform) -> Vec<usize>;
     }
 
     extern "Swift" {

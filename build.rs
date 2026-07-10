@@ -49,6 +49,10 @@ fn main() {
         &xcode_path
     );
     println!("cargo:rustc-link-search=/usr/lib/swift");
+    // Runtime rpath for the Swift runtime dylibs (libswift_Concurrency etc.)
+    // so this crate's own test/example binaries can launch without every consumer
+    // needing a rustflags rpath workaround.
+    println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
 }
 
 fn compile_swift() {

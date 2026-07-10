@@ -51,6 +51,14 @@ path = "tests/load.rs"
 name = "mlarray_types"
 path = "tests/mlarray_types.rs"
 
+[[test]]
+name = "compute_plan"
+path = "tests/compute_plan.rs"
+
+[[example]]
+name = "compute_plan"
+path = "examples/compute_plan.rs"
+
 [dependencies]
 fxhash = "0.2.1"
 

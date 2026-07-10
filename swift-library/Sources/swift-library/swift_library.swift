@@ -470,6 +470,102 @@ extension ComputePlatform {
 	}
 }
 
+/// Synchronized result box for the compute-plan task (Swift 5.5-compatible
+/// alternative to `nonisolated(unsafe)`; access is ordered by the semaphore).
+private final class ComputePlanCounts: @unchecked Sendable {
+	var total: UInt = 0
+	var ane: UInt = 0
+	var gpu: UInt = 0
+	var cpu: UInt = 0
+	var loaded = false
+}
+
+/// Count preferred devices over the operations of one program block tree.
+@available(macOS 14.4, iOS 17.4, *)
+private func tallyBlock(
+	_ block: MLModelStructure.Program.Block, plan: MLComputePlan, into counts: ComputePlanCounts
+) {
+	for op in block.operations {
+		counts.total += 1
+		if let usage = plan.deviceUsage(for: op) {
+			switch usage.preferred {
+			case .neuralEngine: counts.ane += 1
+			case .gpu: counts.gpu += 1
+			case .cpu: counts.cpu += 1
+			@unknown default: break
+			}
+		}
+		for nested in op.blocks { tallyBlock(nested, plan: plan, into: counts) }
+	}
+}
+
+/// Compute-plan introspection via MLComputePlan (macOS 14.4+ / iOS 17.4+).
+///
+/// Loads the compute plan for the compiled model at `path` under the given
+/// compute units and returns `[total, ane, gpu, cpu]` — the number of program
+/// operations whose *preferred* device is each class. Only the `main`
+/// function is counted when present (that is what predictions execute);
+/// multi-function packages without `main` fall back to counting everything.
+/// An empty vector means the plan could not be loaded (older OS, invalid
+/// path, non-program model, or timeout).
+///
+/// This is the ground-truth answer to "did my model actually land on the
+/// ANE?" — throughput alone can silently hide a CPU fallback.
+func computePlanDeviceCounts(path: RustString, compute: ComputePlatform) -> RustVec<UInt> {
+	let counts = RustVec<UInt>()
+	guard #available(macOS 14.4, iOS 17.4, *) else { return counts }
+	// Accept both plain filesystem paths and file:// URL strings — Model's
+	// getCompiledPath() hands back the latter.
+	let raw = path.toString()
+	let url: URL
+	if raw.hasPrefix("file://"), let parsed = URL(string: raw) {
+		url = parsed
+	} else {
+		url = URL(fileURLWithPath: raw)
+	}
+	let units = compute.mlComputeUnits
+	let semaphore = DispatchSemaphore(value: 0)
+	let result = ComputePlanCounts()
+	let task = Task.detached {
+		defer { semaphore.signal() }
+		let config = MLModelConfiguration()
+		config.computeUnits = units
+		let plan: MLComputePlan
+		do {
+			plan = try await MLComputePlan.load(contentsOf: url, configuration: config)
+		} catch {
+			print("[CoreML compute-plan error] \(error)")
+			return
+		}
+		guard !Task.isCancelled else { return }
+		guard case .program(let program) = plan.modelStructure else { return }
+		if let main = program.functions["main"] {
+			tallyBlock(main.block, plan: plan, into: result)
+		} else {
+			for function in program.functions.values {
+				tallyBlock(function.block, plan: plan, into: result)
+			}
+		}
+		result.loaded = true
+	}
+	// Bounded wait: never deadlock the caller if the concurrency pool is
+	// starved — an empty result is a diagnosable failure, a hang is not.
+	// (Plan loading includes model compilation; large chunks on a busy box
+	// can take minutes.)
+	if semaphore.wait(timeout: .now() + 180) == .timedOut {
+		task.cancel()
+		print("[CoreML compute-plan error] timed out loading plan for \(url.path)")
+		return counts
+	}
+	if result.loaded {
+		counts.push(value: result.total)
+		counts.push(value: result.ane)
+		counts.push(value: result.gpu)
+		counts.push(value: result.cpu)
+	}
+	return counts
+}
+
 func initWithCompiledAsset(
 	ptr: UnsafeMutablePointer<UInt8>, len: Int, compute: ComputePlatform
 ) -> Model {

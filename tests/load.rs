@@ -1,14 +1,14 @@
 #![allow(clippy::all)]
 use std::{path::PathBuf, str::FromStr};
 
-use coreml_rs_fork::{mlmodel::CoreMLError, CoreMLModelOptions, CoreMLModelWithState};
+use coreml_rs_fork::{CoreMLError, CoreMLModelOptions, CoreMLModelWithState};
 use sha2::{Digest, Sha256};
 
 #[test]
 pub fn load_empty() {
     let m = CoreMLModelWithState::from_buf(vec![], CoreMLModelOptions::default());
     let res = m.load();
-    assert!(matches!(res, Err(CoreMLError::FailedToLoadStatic(_, _))));
+    assert!(matches!(res, Err(CoreMLError::FailedToLoad(_, _))));
 }
 
 pub fn unzip_to_path_from_hash(buf: &[u8]) -> Option<PathBuf> {
@@ -50,19 +50,19 @@ pub fn reload_from_compiled_path() -> Result<(), anyhow::Error> {
         unzip_to_path_from_hash(&buf).ok_or_else(|| anyhow::anyhow!("Failed to unzip path"))?;
     let m = CoreMLModelWithState::new(&path, CoreMLModelOptions::default());
     let res = m.load();
-    assert!(!matches!(res, Err(CoreMLError::FailedToLoadStatic(_, _))));
+    assert!(!matches!(res, Err(CoreMLError::FailedToLoad(_, _))));
 
     // In actual runtime, the model will be loaded and we could unload it.
     // However, without Swift compiler runtime on non-Mac environments, this returns `Unloaded`.
     // The previous unwrap logic could panic if it was unloaded incorrectly.
     let m = res.expect("model should not fail to load statically");
     let res = m.unload();
-    assert!(!matches!(res, Err(CoreMLError::FailedToLoadStatic(_, _))));
+    assert!(!matches!(res, Err(CoreMLError::FailedToLoad(_, _))));
     let _ = std::fs::remove_dir_all(path);
 
     let m = res.expect("model should not fail to unload statically");
     let res = m.load();
-    assert!(!matches!(res, Err(CoreMLError::FailedToLoadStatic(_, _))));
+    assert!(!matches!(res, Err(CoreMLError::FailedToLoad(_, _))));
     Ok(())
 }
 
@@ -73,13 +73,13 @@ pub fn reload_from_buf() -> Result<(), anyhow::Error> {
     let buf = std::fs::read(model_path)?;
     let m = CoreMLModelWithState::from_buf(buf, CoreMLModelOptions::default());
     let res = m.load();
-    assert!(!matches!(res, Err(CoreMLError::FailedToLoadStatic(_, _))));
+    assert!(!matches!(res, Err(CoreMLError::FailedToLoad(_, _))));
 
     let m = res.expect("model should not fail to load statically");
     let res = m.unload();
-    assert!(!matches!(res, Err(CoreMLError::FailedToLoadStatic(_, _))));
+    assert!(!matches!(res, Err(CoreMLError::FailedToLoad(_, _))));
     let m = res.expect("model should not fail to unload statically");
     let res = m.load();
-    assert!(!matches!(res, Err(CoreMLError::FailedToLoadStatic(_, _))));
+    assert!(!matches!(res, Err(CoreMLError::FailedToLoad(_, _))));
     Ok(())
 }

@@ -292,6 +292,24 @@ All unsafe code is documented with `// SAFETY:` comments and validated by CI. Re
 
 ---
 
+## Linking note: Swift runtime rpath
+
+This crate links a static Swift library that uses Swift Concurrency. Cargo's
+`rustc-link-arg` is not transitive, so **downstream binaries** must carry an
+rpath to the Swift runtime themselves or they can fail at launch with
+`Library not loaded: @rpath/libswift_Concurrency.dylib`. Add to the consuming
+project's `.cargo/config.toml`:
+
+```toml
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-Wl,-rpath,/usr/lib/swift"]
+```
+
+(This repo's own `build.rs` emits the same link-arg for its tests and
+examples.)
+
+---
+
 ## Contributing
 
 Contributions welcome! Areas of focus:
