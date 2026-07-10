@@ -28,3 +28,21 @@ pub use mlmodel::{
 };
 pub use options::{CoreMLModelInfo, CoreMLModelOptions};
 pub use swift::ffi;
+
+/// Print the required cargo directives for linking Swift Concurrency on macOS.
+///
+/// Since `rustc-link-arg` is not transitive, downstream consumers must emit
+/// this rpath themselves in their own `build.rs` to avoid launch-time
+/// "library not loaded" errors for `libswift_Concurrency`.
+///
+/// # Example
+///
+/// In your `build.rs`:
+/// ```rust
+/// coreml_rs::print_swift_linking_directives();
+/// ```
+pub fn print_swift_linking_directives() {
+    if cfg!(target_os = "macos") {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
+    }
+}
