@@ -17,6 +17,56 @@ use std::{
 
 pub use crate::swift::MLModelOutput;
 
+/// Per-device operation counts from an `MLComputePlan` (macOS 14.4+).
+///
+/// `total` is the number of program operations in the compiled model;
+/// `ane`/`gpu`/`cpu` count operations whose *preferred* dispatch device is
+/// that class. Counts may not sum to `total` when the OS reports no device
+/// usage for an operation (e.g. const ops).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ComputePlanDeviceCounts {
+    pub total: usize,
+    pub ane: usize,
+    pub gpu: usize,
+    pub cpu: usize,
+}
+
+impl ComputePlanDeviceCounts {
+    /// Fraction of counted operations preferring the Neural Engine (0.0 when empty).
+    pub fn ane_fraction(&self) -> f64 {
+        let counted = self.ane + self.gpu + self.cpu;
+        if counted == 0 {
+            0.0
+        } else {
+            self.ane as f64 / counted as f64
+        }
+    }
+}
+
+/// Load the `MLComputePlan` for a compiled model (`.mlmodelc`) and report
+/// per-device preferred-operation counts under `platform`.
+///
+/// Returns `None` when the plan cannot be loaded — older OS (< macOS 14.4),
+/// invalid path, or a non-program model. This is the ground-truth check for
+/// silent CPU fallback: throughput numbers alone cannot distinguish "fast
+/// enough on CPU" from "actually resident on the ANE".
+pub fn compute_plan_device_counts(
+    compiled_path: impl AsRef<Path>,
+    platform: crate::ffi::ComputePlatform,
+) -> Option<ComputePlanDeviceCounts> {
+    let path = compiled_path.as_ref().to_string_lossy().to_string();
+    let counts = crate::ffi::computePlanDeviceCounts(path, platform);
+    if counts.len() != 4 {
+        return None;
+    }
+    Some(ComputePlanDeviceCounts {
+        total: counts[0],
+        ane: counts[1],
+        gpu: counts[2],
+        cpu: counts[3],
+    })
+}
+
 /// Maximum tensor size (512MB) - prevents memory exhaustion attacks from oversized inputs.
 const MAX_TENSOR_SIZE_BYTES: usize = 512 * 1024 * 1024;
 
@@ -497,6 +547,21 @@ impl CoreMLModelWithState {
     pub fn compiled_path(&self) -> Option<String> {
         match self {
             CoreMLModelWithState::Loaded(core_mlmodel, _, _) => core_mlmodel.model.compiled_path(),
+            _ => None,
+        }
+    }
+
+    /// Per-device preferred-operation counts for this model's compute plan
+    /// under the compute platform it was loaded with (macOS 14.4+).
+    ///
+    /// `None` when the model is unloaded, has no compiled path, or the OS
+    /// cannot produce a plan. See [`compute_plan_device_counts`].
+    pub fn compute_plan_device_counts(&self) -> Option<ComputePlanDeviceCounts> {
+        match self {
+            CoreMLModelWithState::Loaded(core_mlmodel, info, _) => {
+                let path = core_mlmodel.model.compiled_path()?;
+                compute_plan_device_counts(path, info.opts.compute_platform)
+            }
             _ => None,
         }
     }

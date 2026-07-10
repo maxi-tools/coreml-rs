@@ -23,6 +23,8 @@ mod swift;
 pub use error::CoreMLError;
 pub use ffi::ComputePlatform;
 pub use mlarray::MLDataType;
-pub use mlmodel::{CoreMLModel, CoreMLModelWithState};
+pub use mlmodel::{
+    compute_plan_device_counts, ComputePlanDeviceCounts, CoreMLModel, CoreMLModelWithState,
+};
 pub use options::{CoreMLModelInfo, CoreMLModelOptions};
 pub use swift::ffi;

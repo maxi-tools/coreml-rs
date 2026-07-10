@@ -470,6 +470,74 @@ extension ComputePlatform {
 	}
 }
 
+/// Compute-plan introspection via MLComputePlan (macOS 14.4+ / iOS 17.4+).
+///
+/// Loads the compute plan for the compiled model at `path` under the given
+/// compute units and returns `[total, ane, gpu, cpu]` — the number of program
+/// operations whose *preferred* device is each class. An empty vector means
+/// the plan could not be loaded (older OS, invalid path, non-program model).
+///
+/// This is the ground-truth answer to "did my model actually land on the
+/// ANE?" — throughput alone can silently hide a CPU fallback.
+func computePlanDeviceCounts(path: RustString, compute: ComputePlatform) -> RustVec<UInt> {
+	let counts = RustVec<UInt>()
+	guard #available(macOS 14.4, iOS 17.4, *) else { return counts }
+	// Accept both plain filesystem paths and file:// URL strings — Model's
+	// getCompiledPath() hands back the latter.
+	let raw = path.toString()
+	let url: URL
+	if raw.hasPrefix("file://"), let parsed = URL(string: raw) {
+		url = parsed
+	} else {
+		url = URL(fileURLWithPath: raw)
+	}
+	let units = compute.mlComputeUnits
+	let semaphore = DispatchSemaphore(value: 0)
+	// (total, ane, gpu, cpu) — written by the detached task, read after wait().
+	nonisolated(unsafe) var result: (UInt, UInt, UInt, UInt)? = nil
+	Task.detached {
+		defer { semaphore.signal() }
+		let config = MLModelConfiguration()
+		config.computeUnits = units
+		let plan: MLComputePlan
+		do {
+			plan = try await MLComputePlan.load(contentsOf: url, configuration: config)
+		} catch {
+			print("[CoreML compute-plan error] \(error)")
+			return
+		}
+		guard case .program(let program) = plan.modelStructure else { return }
+		var total: UInt = 0
+		var ane: UInt = 0
+		var gpu: UInt = 0
+		var cpu: UInt = 0
+		func walk(_ block: MLModelStructure.Program.Block) {
+			for op in block.operations {
+				total += 1
+				if let usage = plan.deviceUsage(for: op) {
+					switch usage.preferred {
+					case .neuralEngine: ane += 1
+					case .gpu: gpu += 1
+					case .cpu: cpu += 1
+					@unknown default: break
+					}
+				}
+				for nested in op.blocks { walk(nested) }
+			}
+		}
+		for function in program.functions.values { walk(function.block) }
+		result = (total, ane, gpu, cpu)
+	}
+	semaphore.wait()
+	if let (total, ane, gpu, cpu) = result {
+		counts.push(value: total)
+		counts.push(value: ane)
+		counts.push(value: gpu)
+		counts.push(value: cpu)
+	}
+	return counts
+}
+
 func initWithCompiledAsset(
 	ptr: UnsafeMutablePointer<UInt8>, len: Int, compute: ComputePlatform
 ) -> Model {
