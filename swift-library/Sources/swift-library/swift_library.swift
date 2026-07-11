@@ -330,29 +330,96 @@ class ModelOutput {
 				expectedStrides[i] = expectedStrides[i + 1] * shape[i + 1]
 			}
 		}
-		return (shape, strides, expectedStrides, strides == expectedStrides)
+		// Effective contiguity: a stride is irrelevant on a size-1 dim (it is
+		// never stepped), so IOSurface row-pitch padding that only shows up on
+		// size-1 dims (e.g. shape [1, 1, V] with strides [P, P, 1]) still
+		// permits the zero-copy fast path.
+		var contiguous = true
+		for d in 0..<shape.count where shape[d] > 1 && strides[d] != expectedStrides[d] {
+			contiguous = false
+			break
+		}
+		return (shape, strides, expectedStrides, contiguous)
 	}
 
-	/// Traverse a non-contiguous MLMultiArray in strided order, calling `emit` for each element's pointer offset.
-	private func stridedTraversal(
-		out: MLMultiArray, layout: (shape: [Int], strides: [Int], expectedStrides: [Int], isContiguous: Bool),
-		emit: (Int) -> Void
+	/// Tensors whose non-contiguous layout has already been reported, so the
+	/// (env-gated) diagnostic prints once per tensor instead of per predict.
+	private static var stridedLogged = Set<String>()
+	private static let stridedLoggedLock = NSLock()
+	private static let strideTraceEnabled: Bool = {
+		guard let v = ProcessInfo.processInfo.environment["COREML_RS_STRIDE_TRACE"] else {
+			return false
+		}
+		return !["", "0", "false"].contains(v.lowercased())
+	}()
+
+	private func noteStrided(
+		_ tag: String, _ name: String,
+		_ layout: (shape: [Int], strides: [Int], expectedStrides: [Int], isContiguous: Bool),
+		count: Int
 	) {
+		guard Self.strideTraceEnabled else { return }
+		let key = "\(tag):\(name)"
+		Self.stridedLoggedLock.lock()
+		let seen = !Self.stridedLogged.insert(key).inserted
+		Self.stridedLoggedLock.unlock()
+		if seen { return }
+		print(
+			"[coreml-rs] non-contiguous output \(tag) \(name): shape=\(layout.shape) strides=\(layout.strides) expected=\(layout.expectedStrides) count=\(count) — compacting per predict"
+		)
+	}
+
+	/// Number of trailing elements that are already densely packed, i.e. the
+	/// largest suffix of dims whose strides match a dense packing. Compaction
+	/// copies whole runs of this size with memcpy instead of element-by-element.
+	private func denseInnerRun(
+		_ layout: (shape: [Int], strides: [Int], expectedStrides: [Int], isContiguous: Bool)
+	) -> Int {
+		var run = 1
+		var d = layout.shape.count - 1
+		while d >= 0, layout.shape[d] == 1 || layout.strides[d] == layout.expectedStrides[d] {
+			run *= layout.shape[d]
+			d -= 1
+		}
+		return max(run, 1)
+	}
+
+	/// Compact a non-contiguous typed MLMultiArray into a dense buffer,
+	/// memcpy-ing dense inner runs. Returns a Swift-owned dense array.
+	private func compactStrided<T>(
+		base: UnsafePointer<T>, layout: (shape: [Int], strides: [Int], expectedStrides: [Int], isContiguous: Bool),
+		count: Int
+	) -> [T] {
+		let run = denseInnerRun(layout)
 		let shape = layout.shape
 		let strides = layout.strides
-		let l = out.count
-		var coords = [Int](repeating: 0, count: shape.count)
+		// Dims that participate in the outer walk (everything before the run).
+		var outerDims = shape.count
+		var covered = 1
+		while outerDims > 0, covered < run {
+			covered *= shape[outerDims - 1]
+			outerDims -= 1
+		}
+		var result = [T]()
+		result.reserveCapacity(count)
+		var coords = [Int](repeating: 0, count: outerDims)
 		var offset = 0
-		for _ in 0..<l {
-			emit(offset)
-			for d in Swift.stride(from: shape.count - 1, through: 0, by: -1) {
+		var written = 0
+		while written < count {
+			result.append(contentsOf: UnsafeBufferPointer(start: base + offset, count: run))
+			written += run
+			var d = outerDims - 1
+			while d >= 0 {
 				coords[d] += 1
 				offset += strides[d]
 				if coords[d] < shape[d] { break }
 				coords[d] = 0
 				offset -= shape[d] * strides[d]
+				d -= 1
 			}
+			if d < 0 { break }
 		}
+		return result
 	}
 
 	private func subscriptTraversal(
@@ -383,7 +450,7 @@ class ModelOutput {
 		let l = out.count
 		let layout = contiguousLayout(for: out)
 		if !layout.isContiguous {
-			print("[STRIDE BUG] outputF32 \(name.toString()): shape=\(layout.shape) strides=\(layout.strides) expected=\(layout.expectedStrides) count=\(l)")
+			noteStrided("outputF32", name.toString(), layout, count: l)
 		}
 
 		if layout.isContiguous && out.dataType == .float32 {
@@ -391,13 +458,21 @@ class ModelOutput {
 			return self.cpy ? rust_vec_from_ptr_f32_cpy(ptr, UInt(l)) : rust_vec_from_ptr_f32(ptr, UInt(l))
 		}
 
-		var v = RustVec<Float32>()
 		if out.dataType == .float32 {
+			// Compact into a dense Swift buffer (memcpy of dense inner runs),
+			// then hand it to Rust in a single copying FFI call — the buffer is
+			// temporary, so the zero-copy wrap is never valid here.
 			let ptr = out.dataPointer.assumingMemoryBound(to: Float32.self)
-			stridedTraversal(out: out, layout: layout, emit: { v.push(value: ptr[$0]) })
-		} else {
-			subscriptTraversal(out: out, shape: layout.shape, emitSubscript: { v.push(value: out[$0].floatValue) })
+			let dense = compactStrided(base: ptr, layout: layout, count: l)
+			return dense.withUnsafeBufferPointer { buf in
+				// baseAddress is nil for empty buffers; a nil pointer must
+				// never cross the FFI even for zero-length copies.
+				guard let base = buf.baseAddress else { return RustVec<Float32>() }
+				return rust_vec_from_ptr_f32_cpy(base, UInt(l))
+			}
 		}
+		var v = RustVec<Float32>()
+		subscriptTraversal(out: out, shape: layout.shape, emitSubscript: { v.push(value: out[$0].floatValue) })
 		return v
 	}
 
@@ -407,19 +482,25 @@ class ModelOutput {
 
 		let l = out.count
 		let layout = contiguousLayout(for: out)
+		if !layout.isContiguous {
+			noteStrided("outputI32", name.toString(), layout, count: l)
+		}
 
 		if layout.isContiguous && out.dataType == .int32 {
 			let ptr = out.dataPointer.assumingMemoryBound(to: Int32.self)
 			return self.cpy ? rust_vec_from_ptr_i32_cpy(ptr, UInt(l)) : rust_vec_from_ptr_i32(ptr, UInt(l))
 		}
 
-		var v = RustVec<Int32>()
 		if out.dataType == .int32 {
 			let ptr = out.dataPointer.assumingMemoryBound(to: Int32.self)
-			stridedTraversal(out: out, layout: layout, emit: { v.push(value: ptr[$0]) })
-		} else {
-			subscriptTraversal(out: out, shape: layout.shape, emitSubscript: { v.push(value: out[$0].int32Value) })
+			let dense = compactStrided(base: ptr, layout: layout, count: l)
+			return dense.withUnsafeBufferPointer { buf in
+				guard let base = buf.baseAddress else { return RustVec<Int32>() }
+				return rust_vec_from_ptr_i32_cpy(base, UInt(l))
+			}
 		}
+		var v = RustVec<Int32>()
+		subscriptTraversal(out: out, shape: layout.shape, emitSubscript: { v.push(value: out[$0].int32Value) })
 		return v
 	}
 
@@ -430,7 +511,7 @@ class ModelOutput {
 		let l = out.count
 		let layout = contiguousLayout(for: out)
 		if !layout.isContiguous {
-			print("[STRIDE BUG] outputU16 \(name.toString()): shape=\(layout.shape) strides=\(layout.strides) expected=\(layout.expectedStrides) count=\(l)")
+			noteStrided("outputU16", name.toString(), layout, count: l)
 		}
 
 		if layout.isContiguous && out.dataType == .float16 {
@@ -441,16 +522,22 @@ class ModelOutput {
 		// For f16 data, subscript returns NSNumber wrapping a float —
 		// .uint16Value would truncate to integer, so we round-trip through
 		// Float16 to preserve the raw bit pattern.
-		var v = RustVec<UInt16>()
 		if out.dataType == .float16 {
+			// Compact into a dense Swift buffer (memcpy of dense inner runs),
+			// then hand it to Rust in a single copying FFI call — the buffer is
+			// temporary, so the zero-copy wrap is never valid here.
 			let ptr = out.dataPointer.assumingMemoryBound(to: UInt16.self)
-			stridedTraversal(out: out, layout: layout, emit: { v.push(value: ptr[$0]) })
-		} else {
-			subscriptTraversal(out: out, shape: layout.shape, emitSubscript: {
-				let f16val = Float16(out[$0].floatValue)
-				v.push(value: f16val.bitPattern)
-			})
+			let dense = compactStrided(base: ptr, layout: layout, count: l)
+			return dense.withUnsafeBufferPointer { buf in
+				guard let base = buf.baseAddress else { return RustVec<UInt16>() }
+				return rust_vec_from_ptr_u16_cpy(base, UInt(l))
+			}
 		}
+		var v = RustVec<UInt16>()
+		subscriptTraversal(out: out, shape: layout.shape, emitSubscript: {
+			let f16val = Float16(out[$0].floatValue)
+			v.push(value: f16val.bitPattern)
+		})
 		return v
 	}
 }
