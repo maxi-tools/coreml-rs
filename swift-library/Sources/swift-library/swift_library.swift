@@ -346,8 +346,12 @@ class ModelOutput {
 	/// (env-gated) diagnostic prints once per tensor instead of per predict.
 	private static var stridedLogged = Set<String>()
 	private static let stridedLoggedLock = NSLock()
-	private static let strideTraceEnabled =
-		ProcessInfo.processInfo.environment["COREML_RS_STRIDE_TRACE"] != nil
+	private static let strideTraceEnabled: Bool = {
+		guard let v = ProcessInfo.processInfo.environment["COREML_RS_STRIDE_TRACE"] else {
+			return false
+		}
+		return !["", "0", "false"].contains(v.lowercased())
+	}()
 
 	private func noteStrided(
 		_ tag: String, _ name: String,
@@ -461,7 +465,10 @@ class ModelOutput {
 			let ptr = out.dataPointer.assumingMemoryBound(to: Float32.self)
 			let dense = compactStrided(base: ptr, layout: layout, count: l)
 			return dense.withUnsafeBufferPointer { buf in
-				rust_vec_from_ptr_f32_cpy(buf.baseAddress!, UInt(l))
+				// baseAddress is nil for empty buffers; a nil pointer must
+				// never cross the FFI even for zero-length copies.
+				guard let base = buf.baseAddress else { return RustVec<Float32>() }
+				return rust_vec_from_ptr_f32_cpy(base, UInt(l))
 			}
 		}
 		var v = RustVec<Float32>()
@@ -475,6 +482,9 @@ class ModelOutput {
 
 		let l = out.count
 		let layout = contiguousLayout(for: out)
+		if !layout.isContiguous {
+			noteStrided("outputI32", name.toString(), layout, count: l)
+		}
 
 		if layout.isContiguous && out.dataType == .int32 {
 			let ptr = out.dataPointer.assumingMemoryBound(to: Int32.self)
@@ -485,7 +495,8 @@ class ModelOutput {
 			let ptr = out.dataPointer.assumingMemoryBound(to: Int32.self)
 			let dense = compactStrided(base: ptr, layout: layout, count: l)
 			return dense.withUnsafeBufferPointer { buf in
-				rust_vec_from_ptr_i32_cpy(buf.baseAddress!, UInt(l))
+				guard let base = buf.baseAddress else { return RustVec<Int32>() }
+				return rust_vec_from_ptr_i32_cpy(base, UInt(l))
 			}
 		}
 		var v = RustVec<Int32>()
@@ -518,7 +529,8 @@ class ModelOutput {
 			let ptr = out.dataPointer.assumingMemoryBound(to: UInt16.self)
 			let dense = compactStrided(base: ptr, layout: layout, count: l)
 			return dense.withUnsafeBufferPointer { buf in
-				rust_vec_from_ptr_u16_cpy(buf.baseAddress!, UInt(l))
+				guard let base = buf.baseAddress else { return RustVec<UInt16>() }
+				return rust_vec_from_ptr_u16_cpy(base, UInt(l))
 			}
 		}
 		var v = RustVec<UInt16>()
