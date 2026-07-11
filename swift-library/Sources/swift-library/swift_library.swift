@@ -344,7 +344,8 @@ class ModelOutput {
 
 	/// Tensors whose non-contiguous layout has already been reported, so the
 	/// (env-gated) diagnostic prints once per tensor instead of per predict.
-	private static var stridedLogged = Set<String>()
+	/// Concurrency safety: every access is guarded by `stridedLoggedLock`.
+	nonisolated(unsafe) private static var stridedLogged = Set<String>()
 	private static let stridedLoggedLock = NSLock()
 	private static let strideTraceEnabled: Bool = {
 		guard let v = ProcessInfo.processInfo.environment["COREML_RS_STRIDE_TRACE"] else {
@@ -463,10 +464,11 @@ class ModelOutput {
 			// then hand it to Rust in a single copying FFI call — the buffer is
 			// temporary, so the zero-copy wrap is never valid here.
 			let ptr = out.dataPointer.assumingMemoryBound(to: Float32.self)
-			let dense = compactStrided(base: ptr, layout: layout, count: l)
-			return dense.withUnsafeBufferPointer { buf in
+			var dense = compactStrided(base: ptr, layout: layout, count: l)
+			return dense.withUnsafeMutableBufferPointer { buf in
 				// baseAddress is nil for empty buffers; a nil pointer must
-				// never cross the FFI even for zero-length copies.
+				// never cross the FFI even for zero-length copies. The _cpy
+				// FFI takes a mutable pointer but only reads from it.
 				guard let base = buf.baseAddress else { return RustVec<Float32>() }
 				return rust_vec_from_ptr_f32_cpy(base, UInt(l))
 			}
@@ -493,8 +495,8 @@ class ModelOutput {
 
 		if out.dataType == .int32 {
 			let ptr = out.dataPointer.assumingMemoryBound(to: Int32.self)
-			let dense = compactStrided(base: ptr, layout: layout, count: l)
-			return dense.withUnsafeBufferPointer { buf in
+			var dense = compactStrided(base: ptr, layout: layout, count: l)
+			return dense.withUnsafeMutableBufferPointer { buf in
 				guard let base = buf.baseAddress else { return RustVec<Int32>() }
 				return rust_vec_from_ptr_i32_cpy(base, UInt(l))
 			}
@@ -527,8 +529,8 @@ class ModelOutput {
 			// then hand it to Rust in a single copying FFI call — the buffer is
 			// temporary, so the zero-copy wrap is never valid here.
 			let ptr = out.dataPointer.assumingMemoryBound(to: UInt16.self)
-			let dense = compactStrided(base: ptr, layout: layout, count: l)
-			return dense.withUnsafeBufferPointer { buf in
+			var dense = compactStrided(base: ptr, layout: layout, count: l)
+			return dense.withUnsafeMutableBufferPointer { buf in
 				guard let base = buf.baseAddress else { return RustVec<UInt16>() }
 				return rust_vec_from_ptr_u16_cpy(base, UInt(l))
 			}
