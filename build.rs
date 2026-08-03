@@ -46,7 +46,7 @@ fn main() {
     };
     println!(
         "cargo:rustc-link-search={}/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx/",
-        &xcode_path
+        xcode_path
     );
     println!("cargo:rustc-link-search=/usr/lib/swift");
     // Runtime rpath for the Swift runtime dylibs (libswift_Concurrency etc.)
