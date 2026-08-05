@@ -243,6 +243,21 @@ class ModelOutput {
 		}
 		return "\(self.error!)".intoRustString()
 	}
+
+	/// Resolve a named multiarray from mixed output map (MLMultiArray or MLFeatureValue).
+	/// Returns nil instead of trapping on missing/wrong type (post-transplant review #31).
+	func multiArray(named name: String) -> MLMultiArray? {
+		guard let output = self.output else { return nil }
+		guard let raw = output[name] else { return nil }
+		if let arr = raw as? MLMultiArray {
+			return arr
+		}
+		if let fv = raw as? MLFeatureValue {
+			return fv.multiArrayValue
+		}
+		return nil
+	}
+
 	func outputDescription() -> RustVec<RustString> {
 		if hasFailedToLoad() { return RustVec.init() }
 		let output = self.output!
@@ -255,32 +270,22 @@ class ModelOutput {
 	}
 	func outputF32(name: RustString) -> RustVec<Float32> {
 		if hasFailedToLoad() { return RustVec.init() }
-		let output = self.output!
-		if self.cpy {
-			let out = (output[name.toString()]! as? MLFeatureValue)!.multiArrayValue!
-			let l = out.count
-			var v = RustVec<Float32>()
-			out.withUnsafeMutableBytes { ptr, strides in
-				let p = ptr.baseAddress!.assumingMemoryBound(to: Float32.self)
+		guard let out = multiArray(named: name.toString()) else { return RustVec.init() }
+		let l = out.count
+		var v = RustVec<Float32>()
+		out.withUnsafeMutableBytes { ptr, strides in
+			let p = ptr.baseAddress!.assumingMemoryBound(to: Float32.self)
+			if self.cpy {
 				v = rust_vec_from_ptr_f32_cpy(p, UInt(l))
-			}
-			return v
-		} else {
-			let out = (output[name.toString()]! as? MLMultiArray)!
-			let l = out.count
-			var v = RustVec<Float32>()
-			out.withUnsafeMutableBytes { ptr, strides in
-				let p = ptr.baseAddress!.assumingMemoryBound(to: Float32.self)
+			} else {
 				v = rust_vec_from_ptr_f32(p, UInt(l))
 			}
-			return v
 		}
-
+		return v
 	}
 	func outputI32(name: RustString) -> RustVec<Int32> {
 		if hasFailedToLoad() { return RustVec.init() }
-		let output = self.output!
-		let out = (output[name.toString()]! as? MLMultiArray)!
+		guard let out = multiArray(named: name.toString()) else { return RustVec.init() }
 		let l = out.count
 		var v = RustVec<Int32>()
 		out.withUnsafeMutableBytes { ptr, strides in
@@ -296,13 +301,7 @@ class ModelOutput {
 	// Convert f16 output to f32 on Swift side for better compatibility
 	func outputF16AsF32(name: RustString) -> RustVec<Float32> {
 		if hasFailedToLoad() { return RustVec.init() }
-		let output = self.output!
-		let out: MLMultiArray
-		if let featureValue = output[name.toString()] as? MLFeatureValue {
-			out = featureValue.multiArrayValue!
-		} else {
-			out = (output[name.toString()]! as? MLMultiArray)!
-		}
+		guard let out = multiArray(named: name.toString()) else { return RustVec.init() }
 		let l = out.count
 		var v = RustVec<Float32>()
 		// Read raw f16 data and convert to f32
@@ -326,14 +325,8 @@ class ModelOutput {
 
 	func outputU16(name: RustString) -> RustVec<UInt16> {
 		if hasFailedToLoad() { return RustVec.init() }
-		let output = self.output!
-		// Try MLFeatureValue first (for non-backed outputs), then MLMultiArray
-		let out: MLMultiArray
-		if let featureValue = output[name.toString()] as? MLFeatureValue {
-			out = featureValue.multiArrayValue!
-		} else {
-			out = (output[name.toString()]! as? MLMultiArray)!
-		}
+		// MLFeatureValue or bound MLMultiArray (post-transplant review #31/#32)
+		guard let out = multiArray(named: name.toString()) else { return RustVec.init() }
 		let l = out.count
 		var v = RustVec<UInt16>()
 		out.withUnsafeMutableBytes { ptr, strides in
