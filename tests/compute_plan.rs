@@ -42,10 +42,8 @@ fn ane_fraction_math() {
 fn compute_plan_file_url_works() {
     // Verify that the Swift bridge correctly handles file:// URL schemes
     // by ensuring it doesn't panic and returns None for nonexistent files.
-    let counts = compute_plan_device_counts(
-        "file:///nonexistent/model.mlmodelc",
-        ComputePlatform::All,
-    );
+    let counts =
+        compute_plan_device_counts("file:///nonexistent/model.mlmodelc", ComputePlatform::All);
     assert!(counts.is_none());
 }
 
@@ -54,9 +52,6 @@ fn compute_plan_handles_non_program_models() {
     // Verify that models which are not ML Programs (e.g., older NeuralNetwork models)
     // are handled gracefully (return None) rather than hanging or panicking.
     // We test this with a bogus path which also covers the graceful-failure requirement.
-    let counts = compute_plan_device_counts(
-        "/tmp/legacy-model.mlmodel",
-        ComputePlatform::All,
-    );
+    let counts = compute_plan_device_counts("/tmp/legacy-model.mlmodel", ComputePlatform::All);
     assert!(counts.is_none());
 }
