@@ -39,7 +39,7 @@ pub use swift::ffi;
 ///
 /// In your `build.rs`:
 /// ```rust
-/// coreml_rs::print_swift_linking_directives();
+/// coreml_rs_fork::print_swift_linking_directives();
 /// ```
 pub fn print_swift_linking_directives() {
     if cfg!(target_os = "macos") {

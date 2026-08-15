@@ -1,22 +1,23 @@
 use std::{path::PathBuf, process::Command};
 
 fn main() {
+    println!("cargo:rerun-if-changed=src/swift.rs");
+    println!("cargo:rerun-if-changed=swift-library/Sources/swift-library");
+    println!("cargo:rerun-if-changed=swift-library/Package.swift");
+
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if !matches!(target_os.as_str(), "macos" | "ios") {
+        return;
+    }
+
     // 1. Use `swift-bridge-build` to generate Swift/C FFI glue.
     //    You can also use the `swift-bridge` CLI.
     let bridge_files = vec!["src/swift.rs"];
     swift_bridge_build::parse_bridges(bridge_files)
         .write_all_concatenated(swift_bridge_out_dir(), "rust-calls-swift");
 
-    // Require Swift compiler — without it the FFI layer cannot be built.
-    // Only allow skipping via COREML_RS_SKIP_SWIFT=1 for cargo check workflows.
-    if Command::new("swift").arg("--version").output().is_ok() {
-        // 2. Compile Swift library
-        compile_swift();
-    } else if std::env::var("COREML_RS_SKIP_SWIFT").as_deref() == Ok("1") {
-        println!("cargo:warning=Swift compiler not found. Skipping Swift compilation (COREML_RS_SKIP_SWIFT=1).");
-    } else {
-        panic!("Swift compiler not found. Install Xcode or set COREML_RS_SKIP_SWIFT=1 for check-only builds.");
-    }
+    // 2. Compile Swift library
+    compile_swift();
 
     // 3. Link to Swift library
     println!("cargo:rustc-link-lib=static=swift-library");
@@ -32,27 +33,26 @@ fn main() {
     // ld: warning: Could not find or use auto-linked library 'swiftCompatibility50'
     // ld: warning: Could not find or use auto-linked library 'swiftCompatibilityDynamicReplacements'
     // ld: warning: Could not find or use auto-linked library 'swiftCompatibilityConcurrency'
-    if Command::new("swift").arg("--version").output().is_ok() {
-        let xcode_path = if let Ok(output) = std::process::Command::new("xcode-select")
-            .arg("--print-path")
-            .output()
-        {
-            if output.status.success() {
-                String::from_utf8_lossy(output.stdout.as_slice())
-                    .trim()
-                    .to_string()
-            } else {
-                "/Applications/Xcode.app/Contents/Developer".to_string()
-            }
-        } else {
-            "/Applications/Xcode.app/Contents/Developer".to_string()
-        };
-        println!(
-            "cargo:rustc-link-search={}/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx/",
-            &xcode_path
-        );
-        println!("cargo:rustc-link-search=/usr/lib/swift");
-    }
+    let xcode_path = if let Ok(output) = std::process::Command::new("xcode-select")
+        .arg("--print-path")
+        .output()
+    {
+        String::from_utf8(output.stdout.as_slice().into())
+            .unwrap()
+            .trim()
+            .to_string()
+    } else {
+        "/Applications/Xcode.app/Contents/Developer".to_string()
+    };
+    println!(
+        "cargo:rustc-link-search={}/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/macosx/",
+        xcode_path
+    );
+    println!("cargo:rustc-link-search=/usr/lib/swift");
+    // Runtime rpath for the Swift runtime dylibs (libswift_Concurrency etc.)
+    // so this crate's own test/example binaries can launch without every consumer
+    // needing a rustflags rpath workaround.
+    println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
 }
 
 fn compile_swift() {
