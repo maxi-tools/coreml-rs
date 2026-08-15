@@ -5,6 +5,22 @@ fn main() {
     println!("cargo:rerun-if-changed=swift-library/Sources/swift-library");
     println!("cargo:rerun-if-changed=swift-library/Package.swift");
 
+    // Apple targets this crate actually supports.
+    //
+    // This deliberately does NOT include watchos/tvos. The bundled Swift
+    // package declares `platforms: [.macOS(.v13)]` and nothing else, so there
+    // is no watchOS/tvOS Swift product to link even if this guard let those
+    // targets through — widening it would swap a clean "no Swift bridge built"
+    // for a confusing Swift build failure. The Rust side agrees: `iosurface`
+    // and large parts of `mlmodel`/`mlarray` are gated on
+    // `target_os = "macos"`, and the README's requirements section lists only
+    // macOS (build) and iOS (deployment).
+    //
+    // A stray sentence in the README used to claim watchOS/tvOS support; that
+    // claim was never backed by code and has been corrected rather than
+    // papered over here. If watchOS/tvOS are ever genuinely targeted, the
+    // change belongs in Package.swift and the cfg gates first, and only then
+    // in this list.
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if !matches!(target_os.as_str(), "macos" | "ios") {
         return;

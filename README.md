@@ -1,6 +1,6 @@
 ## Core-ML Rust Bindings
 
-`coreml-rs` is a high-performance Rust library providing safe bindings for Apple's Core ML framework. It enables Rust developers to load and run Core ML models (`.mlmodel`, `.mlpackage`) on iOS, macOS, watchOS, and tvOS with full support for neural engine (ANE) acceleration and batch inference.
+`coreml-rs` is a high-performance Rust library providing safe bindings for Apple's Core ML framework. It enables Rust developers to load and run Core ML models (`.mlmodel`, `.mlpackage`) on macOS and iOS with full support for neural engine (ANE) acceleration and batch inference.
 
 Built using `swift-bridge` for zero-copy interop and backed by `bytemuck`/`half` for efficient data layout.
 

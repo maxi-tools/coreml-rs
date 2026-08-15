@@ -598,6 +598,29 @@ private func tallyBlock(
 	}
 }
 
+/// Build a file `URL` from a string that may be either a plain filesystem
+/// path (`/tmp/model.mlmodelc`) or a `file://` URL string
+/// (`file:///tmp/model.mlmodelc`).
+///
+/// Both forms genuinely reach the Swift bridge. `Model.getCompiledPath()`
+/// returns `URL.absoluteString`, and the Rust unload path stores that string
+/// as the next `CoreMLModelLoader::CompiledPath`, so an unload/reload cycle
+/// feeds a `file://` string straight back into `initWithPath`. Handing such a
+/// string to `URL(fileURLWithPath:)` treats the whole thing as a *relative*
+/// path and resolves it against the current directory — producing nonsense
+/// like `/cwd/file:/tmp/model.mlmodelc` and failing every reload.
+///
+/// `URL(string:)` is used only when the string actually carries the `file://`
+/// scheme, so ordinary paths (including ones with spaces or `%`, which
+/// `URL(string:)` would reject or misparse) still take the
+/// `fileURLWithPath:` route.
+func fileURL(fromPathOrURLString raw: String) -> URL {
+	if raw.hasPrefix("file://"), let parsed = URL(string: raw) {
+		return parsed
+	}
+	return URL(fileURLWithPath: raw)
+}
+
 /// Compute-plan introspection via MLComputePlan (macOS 14.4+ / iOS 17.4+).
 ///
 /// Loads the compute plan for the compiled model at `path` under the given
@@ -613,15 +636,7 @@ private func tallyBlock(
 func computePlanDeviceCounts(path: RustString, compute: ComputePlatform) -> RustVec<UInt> {
 	let counts = RustVec<UInt>()
 	guard #available(macOS 14.4, iOS 17.4, *) else { return counts }
-	// Accept both plain filesystem paths and file:// URL strings — Model's
-	// getCompiledPath() hands back the latter.
-	let raw = path.toString()
-	let url: URL
-	if raw.hasPrefix("file://"), let parsed = URL(string: raw) {
-		url = parsed
-	} else {
-		url = URL(fileURLWithPath: raw)
-	}
+	let url = fileURL(fromPathOrURLString: path.toString())
 	let units = compute.mlComputeUnits
 	let semaphore = DispatchSemaphore(value: 0)
 	let result = ComputePlanCounts()
@@ -709,9 +724,9 @@ func initWithPath(path: RustString, compute: ComputePlatform, compiled: Bool) ->
 	let computeUnits = compute.mlComputeUnits
 	var compiledPath: URL
 	if compiled {
-		compiledPath = URL(fileURLWithPath: path.toString())
+		compiledPath = fileURL(fromPathOrURLString: path.toString())
 	} else {
-		let url = URL(fileURLWithPath: path.toString())
+		let url = fileURL(fromPathOrURLString: path.toString())
 		do {
 			compiledPath = try MLModel.compileModel(at: url)
 		} catch {
@@ -897,15 +912,39 @@ class Model: @unchecked Sendable {
 			outputs[name] = backing
 		}
 		// Keep previous buffers alive — freed on NEXT prediction when replaced.
+		clearBindings()
+		return ModelOutput(output: outputs, error: nil, cpy: true)
+	}
+
+	/// Release the input/output bindings installed for a single prediction.
+	///
+	/// Bindings are single-shot on both sides of the bridge: Rust clears its
+	/// `iosurface_bound_outputs` set once a prediction call returns, whether it
+	/// succeeded or failed. Swift must therefore drop `dict`/`outputs` on every
+	/// exit path too, or a binding the caller has already unlocked stays
+	/// installed and is silently reused by the *next* prediction.
+	///
+	/// The old maps move to `previousDict`/`previousOutputs` rather than being
+	/// released outright, so any buffer CoreML may still be writing into stays
+	/// alive until it is replaced on the following call.
+	private func clearBindings() {
 		self.previousDict = self.dict
 		self.previousOutputs = self.outputs
 		self.outputs = [:]
 		self.dict = [:]
-		return ModelOutput(output: outputs, error: nil, cpy: true)
 	}
 
 	func predictWithState() -> ModelOutput {
+		// Every precondition failure below must clear bindings before
+		// returning. These paths bypass both `finalizePredictionOutput` and the
+		// `catch`, so callers that bound inputs or a single-shot IOSurface
+		// output and then called this before `make_state` (or on an OS without
+		// MLState) used to leave `self.dict`/`self.outputs` installed, while
+		// Rust cleared its own tracking on receiving the error. The stale
+		// backing was then reused by a later regular prediction, after the
+		// caller had unlocked it.
 		guard let model = self.model, let stateAny = self.state else {
+			clearBindings()
 			return ModelOutput(output: nil, error: RuntimeError("Model or state not loaded"))
 		}
 		do {
@@ -913,19 +952,18 @@ class Model: @unchecked Sendable {
 			let opts = predictionOptions()
 			if #available(macOS 15.0, iOS 18.0, *) {
 				guard let state = stateAny as? MLState else {
+					clearBindings()
 					return ModelOutput(output: nil, error: RuntimeError("State is not MLState"))
 				}
 				let result = try model.prediction(from: input, using: state, options: opts)
 				return finalizePredictionOutput(from: result)
 			} else {
+				clearBindings()
 				return ModelOutput(output: nil, error: RuntimeError("MLState requires macOS 15+"))
 			}
 		} catch {
 			// Clear IOSurface-backed outputs on failure (#862 review follow-up).
-			self.previousDict = self.dict
-			self.previousOutputs = self.outputs
-			self.outputs = [:]
-			self.dict = [:]
+			clearBindings()
 			return ModelOutput(output: nil, error: error)
 		}
 	}
@@ -1037,6 +1075,10 @@ class Model: @unchecked Sendable {
 
 	func predict() -> ModelOutput {
 		if hasFailedToLoad() {
+			// Same precondition-failure rule as `predictWithState`: Rust drops
+			// its binding tracking whenever this call reports an error, so the
+			// Swift-side bindings must go with it.
+			clearBindings()
 			return ModelOutput(
 				output: nil, error: RuntimeError("Failed to load model; can't run predict"))
 		}
@@ -1050,10 +1092,7 @@ class Model: @unchecked Sendable {
 			// Clear IOSurface-backed outputs on failure to prevent leaked bindings.
 			// finalizePredictionOutput is only called on success, so the error path
 			// must release references explicitly (#862 review follow-up).
-			self.previousDict = self.dict
-			self.previousOutputs = self.outputs
-			self.outputs = [:]
-			self.dict = [:]
+			clearBindings()
 			return ModelOutput(output: nil, error: error)
 		}
 	}
