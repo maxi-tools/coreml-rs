@@ -192,6 +192,17 @@ impl crate::state::ModelState for CoreMLModelWithState {
                         let mut coreml_model = CoreMLModel::load_buffer(vec, info.clone());
                         coreml_model.model.load();
                         let loader = CoreMLModelLoader::BufferToDisk(u);
+                        // Same defect as the batch loader's cached path: a
+                        // cache file can decompress cleanly and still contain a
+                        // model CoreML rejects. The Buffer branch above checks
+                        // `failed()`; this one must too, or a broken model is
+                        // reported as `Loaded`.
+                        if coreml_model.model.failed() {
+                            return Err(CoreMLError::FailedToLoad(
+                                "Failed to load model from cached buffer path; likely not a CoreML mlmodel file".to_string(),
+                                Self::Unloaded(info, loader),
+                            ));
+                        }
                         Ok(Self::Loaded(coreml_model, info, loader))
                     }
                     Err(_err) => Err(CoreMLError::FailedToLoad(
@@ -789,10 +800,46 @@ impl CoreMLModel {
                 // Swift's MLMultiArray deallocator now owns this buffer.
                 std::mem::forget(data_bytes);
             }
+            MLArray::UInt16Array(array_base) => {
+                // `From<ArrayD<u16>>` produces this variant, and callers use it
+                // to hand over raw f16 bit patterns. It shares the Swift
+                // binding with Float16Array (`bindInputU16` builds an
+                // `MLMultiArrayDataType.float16` array), so route it the same
+                // way — dropping this arm silently broke every existing u16
+                // caller with an "unsupported input" error.
+                let owned = array_base.as_standard_layout().into_owned();
+                let (data, offset) = owned.into_raw_vec_and_offset();
+                assert!(
+                    matches!(offset, Some(0) | None),
+                    "array base offset is not zero; bad aligned input"
+                );
+                let capacity = data.capacity();
+                let mut data_bytes = unsafe {
+                    let ptr = data.as_ptr() as *mut u8;
+                    let len = data.len() * 2;
+                    let cap = data.capacity() * 2;
+                    std::mem::forget(data);
+                    Vec::from_raw_parts(ptr, len, cap)
+                };
+
+                if !self.model.bindInputU16(
+                    shape,
+                    &name,
+                    data_bytes.as_mut_ptr() as *mut u16,
+                    capacity,
+                ) {
+                    return Err(CoreMLError::UnknownError(
+                        "failed to bind u16 input to model".to_string(),
+                    ));
+                }
+                // Swift's MLMultiArray deallocator now owns this buffer.
+                std::mem::forget(data_bytes);
+            }
             _ => {
-                return Err(CoreMLError::UnknownError(
-                    "unsupported input type for bindInput".to_string(),
-                ));
+                return Err(CoreMLError::BadInputShape(format!(
+                    "unsupported input type for '{}': only f32, f16, i32, u16, and CVPixelBuffer inputs are supported",
+                    tag.as_ref()
+                )));
             }
         }
         Ok(())

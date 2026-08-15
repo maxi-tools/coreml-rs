@@ -140,6 +140,16 @@ impl crate::state::ModelState for CoreMLBatchModelWithState {
                         let mut coreml_model = CoreMLBatchModel::load_buffer(vec, info.clone());
                         coreml_model.model.load();
                         let loader = CoreMLModelLoader::BufferToDisk(u);
+                        // A cache file can decompress cleanly and still hold a
+                        // model CoreML refuses — match the in-memory and
+                        // path branches, which both reject `failed()` instead
+                        // of reporting a broken model as `Loaded`.
+                        if coreml_model.model.failed() {
+                            return Err(CoreMLError::FailedToLoadBatch(
+                                "Failed to load model from cached buffer path; likely not a CoreML mlmodel file".to_string(),
+                                Self::Unloaded(info, loader),
+                            ));
+                        }
                         Ok(Self::Loaded(coreml_model, info, loader))
                     }
                     Err(err) => Err(CoreMLError::FailedToLoadBatch(
@@ -306,32 +316,57 @@ impl CoreMLBatchModel {
         let shape: Vec<usize> = input.shape().to_vec();
 
         use std::mem::ManuallyDrop;
+        // `MLArray` implements `Drop` (it zeroes its backing store), so the
+        // owned tensor cannot be moved out of the enum by pattern match.
+        // Suppress the drop glue and take the payload out by hand instead —
+        // the previous code cloned the tensor (an O(N) copy of the whole input
+        // buffer, per call, in the hot path) purely to satisfy the borrow
+        // checker, and then never destroyed the original, leaking one full
+        // input tensor on every successful bind.
         let mut s = ManuallyDrop::new(input);
+        let mut unsupported = false;
         match &mut *s {
             MLArray::Float32Array(array_base) => {
-                let (data, offset) = array_base.clone().into_raw_vec_and_offset();
+                // SAFETY: `array_base` points at the live, initialized payload
+                // of the `Float32Array` variant. `ptr::read` moves it out
+                // bitwise. `s` is a `ManuallyDrop`, so `MLArray::drop` never
+                // runs, and no path below reads or drops `s` again — the
+                // buffer therefore has exactly one owner at every point: first
+                // `data`, then either Swift's `MLMultiArray` deallocator (on
+                // the `mem::forget` success path) or `data`'s own drop (on the
+                // bind-failure path). No double free, no leak.
+                let array_owned = unsafe { std::ptr::read(array_base) };
+                let (mut data, offset) = array_owned.into_raw_vec_and_offset();
                 assert!(
                     matches!(offset, Some(0) | None),
                     "array base offset is not zero; bad aligned input"
                 );
-                let mut data = data;
                 let capacity = data.capacity();
 
                 if !self
                     .model
                     .bindInputF32(shape, &name, data.as_mut_ptr(), capacity, idx)
                 {
+                    // Swift took no ownership, so `data` drops here and frees
+                    // the tensor we just moved out of `s`.
                     return Err(CoreMLError::UnknownError(
                         "failed to bind input to model".to_string(),
                     ));
                 }
+                // Swift's MLMultiArray deallocator now owns this buffer.
                 std::mem::forget(data);
             }
-            _ => {
-                return Err(CoreMLError::UnknownError(
-                    "unsupported input type for batch model".to_string(),
-                ));
-            }
+            _ => unsupported = true,
+        }
+        if unsupported {
+            // SAFETY: nothing was moved out of `s` on this path, its payload is
+            // still fully initialized, and `s` is not used again afterwards —
+            // so running the enum's own drop glue exactly once here is
+            // correct. Without it the rejected tensor would leak.
+            unsafe { ManuallyDrop::drop(&mut s) };
+            return Err(CoreMLError::UnknownError(
+                "unsupported input type for batch model".to_string(),
+            ));
         }
         Ok(())
     }
