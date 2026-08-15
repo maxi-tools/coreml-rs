@@ -168,37 +168,51 @@ class ModelDescription {
 
 	func failedToLoad() -> Bool { return self.description == nil }
 
+	// The accessors below bind `self.description` with `guard let` rather than
+	// force-unwrapping after `failedToLoad()`. `description` is a mutable
+	// stored property, so the check and the unwrap are two separate reads —
+	// binding once removes the window entirely.
 	func inputs() -> RustVec<RustString> {
 		let ret = RustVec<RustString>()
-		if !failedToLoad() {
-			for (_, value) in self.description!.inputDescriptionsByName {
-				let str = "\(value)".intoRustString()
-				ret.push(value: str)
-			}
+		guard let description = self.description else { return ret }
+		for (_, value) in description.inputDescriptionsByName {
+			let str = "\(value)".intoRustString()
+			ret.push(value: str)
 		}
 		return ret
 	}
 	func outputs() -> RustVec<RustString> {
 		let ret = RustVec<RustString>()
-		if !failedToLoad() {
-			for (_, value) in self.description!.outputDescriptionsByName {
-				let str = "\(value)".intoRustString()
-				ret.push(value: str)
-			}
+		guard let description = self.description else { return ret }
+		for (_, value) in description.outputDescriptionsByName {
+			let str = "\(value)".intoRustString()
+			ret.push(value: str)
 		}
 		return ret
 	}
 	func output_type(name: RustStr) -> RustString {
-		if !failedToLoad() {
-			let res = self.description!.outputDescriptionsByName[name.toString()]!
-			if res.multiArrayConstraint!.dataType == MLMultiArrayDataType.float32 {
-				return "f32".intoRustString()
-			}
-			if res.multiArrayConstraint!.dataType == MLMultiArrayDataType.float16 {
-				return "f16".intoRustString()
-			}
+		// Every unwrap here was a force unwrap: an unknown feature name or a
+		// non-multi-array output (image, dictionary, sequence) crashed the
+		// process instead of returning the "unknown type" empty string.
+		guard let description = self.description,
+			let res = description.outputDescriptionsByName[name.toString()],
+			let constraint = res.multiArrayConstraint
+		else {
+			return "".intoRustString()
 		}
-		return "".intoRustString()
+		switch constraint.dataType {
+		case .float32:
+			return "f32".intoRustString()
+		case .float16:
+			return "f16".intoRustString()
+		case .int32:
+			// `bindOutputI32` and the Rust-side "int32" dispatch both exist;
+			// without this case an Int32 multi-array output reported the empty
+			// string and was rejected before prediction ever ran.
+			return "int32".intoRustString()
+		default:
+			return "".intoRustString()
+		}
 	}
 	func output_shape(name: RustStr) -> RustVec<UInt> {
 		if !failedToLoad() {
@@ -251,25 +265,21 @@ class ModelDescription {
 	}
 
 	func output_names() -> RustVec<RustString> {
-		if !failedToLoad() {
-			let ret = RustVec<RustString>()
-			for (key, _) in self.description!.outputDescriptionsByName {
-				ret.push(value: key.intoRustString())
-			}
-			return ret
+		let ret = RustVec<RustString>()
+		guard let description = self.description else { return ret }
+		for (key, _) in description.outputDescriptionsByName {
+			ret.push(value: key.intoRustString())
 		}
-		return RustVec.init()
+		return ret
 	}
 
 	func input_names() -> RustVec<RustString> {
-		if !failedToLoad() {
-			let ret = RustVec<RustString>()
-			for (key, _) in self.description!.inputDescriptionsByName {
-				ret.push(value: key.intoRustString())
-			}
-			return ret
+		let ret = RustVec<RustString>()
+		guard let description = self.description else { return ret }
+		for (key, _) in description.inputDescriptionsByName {
+			ret.push(value: key.intoRustString())
 		}
-		return RustVec.init()
+		return ret
 	}
 }
 
@@ -861,13 +871,30 @@ class Model: @unchecked Sendable {
 	var previousOutputs: [String: Any] = [:]
 
 	private func finalizePredictionOutput(from result: MLFeatureProvider) -> ModelOutput {
-		let usedOutputBackings = !self.outputs.isEmpty
-		let outputs: [String: Any]
-		if usedOutputBackings {
-			outputs = self.outputs
+		// Start from everything the model actually produced, then overlay the
+		// caller-supplied backings on top.
+		//
+		// The order matters. The previous code returned `self.outputs` alone
+		// whenever it was non-empty, which is only correct when *every* output
+		// is backed. An output pre-bound with `bindOutputIOSurface` on a model
+		// that also has a dynamic-shaped output hits exactly that case: the
+		// Rust side skips its auto-backing allocation loop (dynamic shape), so
+		// `self.outputs` holds just the one IOSurface entry — and every other
+		// output silently disappeared.
+		var outputs: [String: Any] = [:]
+		if let features = result as? MLDictionaryFeatureProvider {
+			outputs = features.dictionary
 		} else {
-			let features = result as? MLDictionaryFeatureProvider
-			outputs = features?.dictionary ?? [:]
+			for name in result.featureNames {
+				if let value = result.featureValue(for: name) {
+					outputs[name] = value
+				}
+			}
+		}
+		// Backings win: CoreML wrote into the caller's buffer/surface, and for
+		// IOSurface-bound outputs that entry is the one the caller expects.
+		for (name, backing) in self.outputs {
+			outputs[name] = backing
 		}
 		// Keep previous buffers alive — freed on NEXT prediction when replaced.
 		self.previousDict = self.dict
@@ -1230,6 +1257,16 @@ class Model: @unchecked Sendable {
 			// deallocator releases it; the pointer itself belongs to the
 			// IOSurface, not to the heap, so we must NOT free() it.
 			let retained = Unmanaged.passRetained(surfaceRef)
+			// The retain is only balanced by the deallocator, and the
+			// deallocator only ever runs if MLMultiArray construction
+			// succeeds. If the initializer rejects the pointer/shape/strides
+			// we reach `catch` with no array in existence, so the retain must
+			// be released here or every failed bind leaks one reference and
+			// the surface is never reclaimed.
+			var arrayInstalled = false
+			defer {
+				if !arrayInstalled { retained.release() }
+			}
 			let deallocMultiArray = { (_ ptr: UnsafeMutableRawPointer) -> Void in
 				retained.release()
 			}
@@ -1241,6 +1278,7 @@ class Model: @unchecked Sendable {
 				strides: strideArr,
 				deallocator: deallocMultiArray
 			)
+			arrayInstalled = true
 			let value = MLFeatureValue(multiArray: array)
 			self.dict[featureName.toString()] = value
 			return true
@@ -1340,6 +1378,14 @@ class Model: @unchecked Sendable {
 			// The deallocator releases it; the pointer itself belongs
 			// to the IOSurface, not the heap, so we must NOT free() it.
 			let retained = Unmanaged.passRetained(surfaceRef)
+			// Mirror of `bindInputIOSurface`: the retain is balanced only by
+			// the deallocator, which never runs if the MLMultiArray
+			// initializer throws. Release explicitly on that path so a
+			// rejected shape/stride does not leak a surface reference.
+			var arrayInstalled = false
+			defer {
+				if !arrayInstalled { retained.release() }
+			}
 			let deallocMultiArray = { (_ ptr: UnsafeMutableRawPointer) -> Void in
 				retained.release()
 			}
@@ -1351,6 +1397,7 @@ class Model: @unchecked Sendable {
 				strides: strideArr,
 				deallocator: deallocMultiArray
 			)
+			arrayInstalled = true
 			// Install as an output backing. `predictionOptions()` copies
 			// `self.outputs` into `MLPredictionOptions.outputBackings`
 			// before predict().
