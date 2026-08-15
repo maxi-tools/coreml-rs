@@ -22,6 +22,47 @@ use tempfile::NamedTempFile;
 
 pub use crate::swift::MLModelOutput;
 
+/// Move `array`'s `elem_count` elements into a `Vec` in C-standard (row-major)
+/// order, without copying when the array is already laid out that way.
+///
+/// Swift builds row-major strides from the *logical* shape it is handed (see
+/// `bindInputF32` in `swift_library.swift`), so the allocation it receives must
+/// be in C-standard order and must start at the first element the shape
+/// describes. `ArrayBase::into_raw_vec_and_offset` returns the allocation in
+/// *memory* order, which for a transposed (or otherwise non-standard) array is
+/// a different permutation of the values than the strides claim — CoreML would
+/// silently consume scrambled input under a shape that still looks valid.
+///
+/// Three cases, in decreasing order of frequency:
+///
+/// * **Standard layout at offset 0** — the overwhelmingly common case. The
+///   allocation already matches what Swift expects, so it is moved out
+///   untouched and no allocation or copy occurs.
+/// * **Standard layout at a nonzero offset** — an *owned but sliced* array is
+///   C-contiguous yet begins part way into its allocation. The elements are
+///   compacted to the front in place. The previous code asserted `offset == 0`
+///   here and panicked on this perfectly legal input.
+/// * **Non-standard layout** — e.g. an owned transposed array.
+///   `as_standard_layout` materializes a row-major copy; this is the only
+///   branch that allocates.
+fn into_standard_layout_vec<A: Clone>(array: ndarray::ArrayD<A>, elem_count: usize) -> Vec<A> {
+    if array.is_standard_layout() {
+        let (mut data, offset) = array.into_raw_vec_and_offset();
+        let offset = offset.unwrap_or(0);
+        if offset != 0 || data.len() != elem_count {
+            data.drain(..offset);
+            data.truncate(elem_count);
+        }
+        data
+    } else {
+        array
+            .as_standard_layout()
+            .into_owned()
+            .into_raw_vec_and_offset()
+            .0
+    }
+}
+
 /// A wrapper around a Core ML batch model that tracks its loading state.
 ///
 /// Similar to `CoreMLModelWithState`, this enum enables flexible lifecycle
@@ -287,22 +328,37 @@ impl CoreMLBatchModel {
         }
     }
 
-    pub fn load_buffer(mut buf: Vec<u8>, info: CoreMLModelInfo) -> Self {
+    /// Load a batch model from an in-memory `.mlmodel` buffer.
+    ///
+    /// # Buffer ownership
+    ///
+    /// Identical to [`crate::mlmodel::CoreMLModel::load_buffer`]: the
+    /// allocation is transferred to Swift, which wraps it in
+    /// `Data(bytesNoCopy:deallocator:)` and frees it through
+    /// `rust_vec_free_u8`. Swift takes ownership before the `do`/`catch`, so
+    /// it owns the buffer on the load-failure path too. `Box::into_raw` leaks
+    /// it on the Rust side deliberately — Swift is the sole owner and the sole
+    /// free, and this type stores no reference to it.
+    ///
+    /// The boxed-slice normalization matters for the same reason: the Swift
+    /// deallocator reconstructs `Vec::from_raw_parts(ptr, len, len)`, so
+    /// capacity must equal length or the allocation is freed under the wrong
+    /// layout.
+    pub fn load_buffer(buf: Vec<u8>, info: CoreMLModelInfo) -> Self {
+        let buf = buf.into_boxed_slice();
+        let len = buf.len();
+        // Ownership moves to Swift here — see the note above.
+        let ptr = Box::into_raw(buf) as *mut u8;
+
         let model = Self::apply_options(
-            modelWithAssetsBatch(
-                buf.as_mut_ptr(),
-                buf.len() as isize,
-                info.opts.compute_platform,
-            ),
+            modelWithAssetsBatch(ptr, len as isize, info.opts.compute_platform),
             &info.opts,
         );
 
-        let coreml_model = Self {
+        Self {
             model,
             outputs: Default::default(),
-        };
-        std::mem::forget(buf);
-        coreml_model
+        }
     }
 
     pub fn add_input(
@@ -329,18 +385,26 @@ impl CoreMLBatchModel {
             MLArray::Float32Array(array_base) => {
                 // SAFETY: `array_base` points at the live, initialized payload
                 // of the `Float32Array` variant. `ptr::read` moves it out
-                // bitwise. `s` is a `ManuallyDrop`, so `MLArray::drop` never
-                // runs, and no path below reads or drops `s` again — the
-                // buffer therefore has exactly one owner at every point: first
-                // `data`, then either Swift's `MLMultiArray` deallocator (on
-                // the `mem::forget` success path) or `data`'s own drop (on the
-                // bind-failure path). No double free, no leak.
+                // bitwise into `array_owned`, which is now the sole owner of
+                // the tensor. `s` is a `ManuallyDrop`, so `MLArray::drop` never
+                // runs, and no path below reads or drops `s` again.
+                //
+                // Ownership from here, on both layout branches:
+                //   * standard layout — `into_raw_vec_and_offset` consumes
+                //     `array_owned` and moves the same allocation into `data`.
+                //   * non-standard layout — `array_owned` is only borrowed to
+                //     produce a fresh standard-layout `data`, then dropped
+                //     normally at the end of this arm, freeing the original
+                //     exactly once.
+                // Either way `data` is the unique owner at the bind call, and
+                // it passes to Swift's `MLMultiArray` deallocator on the
+                // `mem::forget` success path, or is dropped by Rust on the
+                // bind-failure path. No double free, no leak.
                 let array_owned = unsafe { std::ptr::read(array_base) };
-                let (mut data, offset) = array_owned.into_raw_vec_and_offset();
-                assert!(
-                    matches!(offset, Some(0) | None),
-                    "array base offset is not zero; bad aligned input"
-                );
+
+                let elem_count: usize = shape.iter().product();
+                let mut data = into_standard_layout_vec(array_owned, elem_count);
+                debug_assert_eq!(data.len(), elem_count);
                 let capacity = data.capacity();
 
                 if !self
@@ -417,5 +481,78 @@ impl CoreMLBatchModel {
 
     pub fn description(&self) -> crate::description::ModelDescription {
         self.model.description().into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::into_standard_layout_vec;
+    use ndarray::{array, s, Array2};
+
+    /// The hot path: an already C-contiguous array must be moved, not copied.
+    /// The returned `Vec` should reuse the original allocation, so the base
+    /// pointer is unchanged.
+    #[test]
+    fn standard_layout_input_is_moved_not_copied() {
+        let arr: Array2<f32> = array![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]];
+        let arr = arr.into_dyn();
+        let expected_ptr = arr.as_ptr();
+
+        let out = into_standard_layout_vec(arr, 6);
+
+        assert_eq!(out, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(
+            out.as_ptr(),
+            expected_ptr,
+            "already-standard input must not be reallocated"
+        );
+    }
+
+    /// Regression: an owned *transposed* array is non-standard layout. Handing
+    /// its raw allocation to Swift gave CoreML memory-order values under
+    /// row-major strides, i.e. a silent transposition of the input.
+    #[test]
+    fn transposed_input_is_materialized_in_row_major_order() {
+        let arr: Array2<f32> = array![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]];
+        let transposed = arr.t().to_owned().into_dyn();
+        assert_eq!(transposed.shape(), &[3, 2]);
+
+        let out = into_standard_layout_vec(transposed, 6);
+
+        // Row-major traversal of the 3x2 transpose.
+        assert_eq!(out, vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+    }
+
+    /// Regression: an owned array that was sliced is C-contiguous but starts
+    /// at a nonzero offset into its allocation. This used to trip the
+    /// `offset == 0` assertion and panic.
+    #[test]
+    fn sliced_owned_input_with_nonzero_offset_is_compacted() {
+        let arr: Array2<f32> = array![
+            [1.0, 2.0, 3.0],
+            [4.0, 5.0, 6.0],
+            [7.0, 8.0, 9.0],
+            [10.0, 11.0, 12.0]
+        ];
+        // Rows 1..3 — contiguous, but beginning 3 elements into the buffer.
+        let sliced = arr.slice_move(s![1..3, ..]).into_dyn();
+        assert_eq!(sliced.shape(), &[2, 3]);
+
+        let out = into_standard_layout_vec(sliced, 6);
+
+        assert_eq!(out, vec![4.0, 5.0, 6.0, 7.0, 8.0, 9.0]);
+    }
+
+    /// A sliced *column* range is neither contiguous nor standard layout; it
+    /// must still come back in row-major order.
+    #[test]
+    fn non_contiguous_column_slice_is_materialized() {
+        let arr: Array2<f32> = array![[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]];
+        let sliced = arr.slice_move(s![.., 0..2]).into_dyn();
+        assert_eq!(sliced.shape(), &[2, 2]);
+
+        let out = into_standard_layout_vec(sliced, 4);
+
+        assert_eq!(out, vec![1.0, 2.0, 4.0, 5.0]);
     }
 }
