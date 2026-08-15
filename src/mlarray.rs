@@ -166,6 +166,16 @@ impl MLArray {
         dtype: MLDataType,
         shape: &[usize],
     ) -> Result<Self, crate::CoreMLError> {
+        // Null check FIRST: every framework call below (notably
+        // `IOSurfaceGetAllocSize`) takes the surface by non-null reference, so
+        // reaching them with a null pointer is UB inside IOSurface itself, not
+        // a recoverable error. `RetainedIOSurface::retain` also rejects null,
+        // but it only runs *after* the alloc-size query — too late.
+        if surface.is_null() {
+            return Err(crate::CoreMLError::BadInputShape(
+                "IOSurfaceRef is null".to_string(),
+            ));
+        }
         if shape.is_empty() || shape.iter().any(|&d| d == 0) {
             return Err(crate::CoreMLError::BadInputShape(format!(
                 "IOSurface shape must be non-empty with no zero dims, got {shape:?}"
@@ -307,8 +317,22 @@ macro_rules! impl_mltype {
                 MLArray::$variant(array)
             }
             fn extract_from_mlarray(ml_array: MLArray) -> Option<Array<Self, Dim<IxDynImpl>>> {
+                // Confirm the variant BEFORE suppressing the drop glue. If the
+                // caller asked for the wrong type, `ml_array` must still be
+                // dropped normally — wrapping it in `ManuallyDrop` first would
+                // leak the whole tensor (or a retained IOSurface) on every
+                // mismatched call.
+                if !matches!(ml_array, MLArray::$variant(_)) {
+                    return None;
+                }
                 let mut ml_array = std::mem::ManuallyDrop::new(ml_array);
                 if let MLArray::$variant(ref mut array) = *ml_array {
+                    // SAFETY: the variant was just confirmed to match, so
+                    // `array` points at a live, initialized payload.
+                    // `ptr::read` moves it out bitwise; `ml_array` is a
+                    // `ManuallyDrop` that is never dropped and never read
+                    // again, so the returned array is the sole owner of the
+                    // buffer — no double free, no leak.
                     unsafe { Some(std::ptr::read(array)) }
                 } else {
                     None
@@ -334,12 +358,37 @@ impl MLType for u16 {
     }
 
     fn extract_from_mlarray(ml_array: MLArray) -> Option<Array<Self, Dim<IxDynImpl>>> {
+        // Confirm an accepted variant BEFORE suppressing the drop glue —
+        // otherwise a mismatched request leaks the tensor inside the
+        // `ManuallyDrop`. (Matching on `_` binds nothing, so this does not
+        // move out of the `Drop`-implementing enum.)
+        match ml_array {
+            MLArray::UInt16Array(_) | MLArray::Float16Array(_) => {}
+            _ => return None,
+        }
         let mut ml_array = std::mem::ManuallyDrop::new(ml_array);
         match *ml_array {
+            // SAFETY (both arms): the variant was confirmed above, so the
+            // reference points at a live, initialized payload. `ptr::read`
+            // moves it out bitwise; `ml_array` is a `ManuallyDrop` that is
+            // never dropped and never read again, so ownership of the buffer
+            // transfers exactly once.
             MLArray::UInt16Array(ref mut array) => unsafe { Some(std::ptr::read(array)) },
-            MLArray::Float16Array(ref mut array) => unsafe {
-                Some(std::mem::transmute(std::ptr::read(array)))
-            },
+            MLArray::Float16Array(ref mut array) => {
+                let f16_array = unsafe { std::ptr::read(array) };
+                // Element-wise bit reinterpret via `mapv`. The previous
+                // implementation `transmute`d the whole
+                // `ArrayBase<OwnedRepr<f16>, _>` into
+                // `ArrayBase<OwnedRepr<u16>, _>`; that is UB, because Rust
+                // guarantees no layout relationship between instantiations of
+                // a generic non-`#[repr(C)]` struct at different type
+                // parameters. `f16::to_bits` is the documented, exact bit
+                // pattern, so the observable result is unchanged — at the cost
+                // of one O(N) copy on this compatibility path. The hot path
+                // (`add_output_u16`, which passes a real `UInt16Array`) still
+                // takes the zero-copy arm above.
+                Some(f16_array.mapv(f16::to_bits))
+            }
             _ => None,
         }
     }
