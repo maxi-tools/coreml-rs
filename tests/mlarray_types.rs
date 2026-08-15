@@ -107,3 +107,59 @@ fn transposed_f32_is_standard_layout() {
     assert_eq!(contiguous[[0, 1]], 4.0);
     assert_eq!(contiguous[[1, 0]], 2.0);
 }
+
+/// Regression: `MLType for u16` accepts a `Float16Array` and hands back the
+/// raw IEEE-754 binary16 bit patterns. This used to go through
+/// `std::mem::transmute` on the whole `ArrayBase`, which is UB — Rust
+/// guarantees no layout relationship between instantiations of a generic
+/// non-`#[repr(C)]` struct at different type parameters. The replacement is an
+/// element-wise `f16::to_bits`, so this test pins the exact bit patterns.
+#[test]
+fn f16_array_extracts_as_u16_bit_patterns() {
+    use half::f16;
+    let values = [
+        f16::from_f32(0.0),
+        f16::from_f32(1.0),
+        f16::from_f32(-2.0),
+        f16::from_f32(65504.0), // f16::MAX
+    ];
+    let expected: Vec<u16> = values.iter().map(|v| v.to_bits()).collect();
+    let arr = Array::from_shape_vec(IxDyn(&[4]), values.to_vec()).unwrap();
+    let ml: MLArray = arr.into();
+    let recovered: Array<u16, _> = ml.extract_to_tensor().expect("f16 -> u16 extract failed");
+    assert_eq!(recovered.into_raw_vec_and_offset().0, expected);
+}
+
+/// Regression: extracting the wrong type must not consume the array into a
+/// `ManuallyDrop` that is never destroyed. The observable contract is just the
+/// error, but this pins the behaviour the leak fix preserves.
+#[test]
+fn mismatched_extract_reports_error() {
+    let arr = Array::from_shape_vec(IxDyn(&[2]), vec![1.0f32, 2.0]).unwrap();
+    let ml: MLArray = arr.into();
+    let err = ml
+        .extract_to_tensor::<i32>()
+        .expect_err("expected a type mismatch");
+    assert!(err.contains("type mismatch"), "unexpected error: {err}");
+
+    let arr = Array::from_shape_vec(IxDyn(&[2]), vec![1u8, 2]).unwrap();
+    let ml: MLArray = arr.into();
+    assert!(ml.extract_to_tensor::<u16>().is_err());
+}
+
+/// Regression: a null `IOSurfaceRef` must be rejected before any IOSurface
+/// framework call. The alloc-size query used to run first, handing a null
+/// reference straight into IOSurface.
+#[cfg(target_os = "macos")]
+#[test]
+fn null_iosurface_is_rejected_without_calling_the_framework() {
+    use coreml_rs_fork::mlarray::MLDataType;
+    // SAFETY: the null pointer is exactly the input under test; the function
+    // must detect it and return before dereferencing anything.
+    let res = unsafe { MLArray::from_iosurface(std::ptr::null(), MLDataType::Float32, &[2, 2]) };
+    let err = res.err().expect("null surface must be rejected");
+    assert!(
+        matches!(err, coreml_rs_fork::CoreMLError::BadInputShape(_)),
+        "expected BadInputShape, got {err:?}"
+    );
+}
