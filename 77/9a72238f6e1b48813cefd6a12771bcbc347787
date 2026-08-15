@@ -1,0 +1,21 @@
+src/mlarray.rs
+  s_1e3d43461640b3::t_275d5330de3c5f 320-327,330-335
+  s_1e3d43461640b3::t_89906699c7296c 169-178
+  s_1e3d43461640b3::t_3351522699bdff 361-368,371-375,377-391
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "779a72238f6e1b48813cefd6a12771bcbc347787",
+  "prompts": {},
+  "sessions": {
+    "s_1e3d43461640b3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fcc6e37d-e664-4ab9-8157-1cbb6a0dcee9",
+        "model": "claude-opus-5"
+      },
+      "human_author": "maxi boch <maxi@maxibookair26black.warbler-tawny.ts.net>"
+    }
+  }
+}
