@@ -16,8 +16,21 @@ fn main() {
     swift_bridge_build::parse_bridges(bridge_files)
         .write_all_concatenated(swift_bridge_out_dir(), "rust-calls-swift");
 
-    // 2. Compile Swift library
-    compile_swift();
+    // 2. Compile Swift library.
+    //
+    // The Swift compiler is required — without it the FFI layer cannot be
+    // built. `COREML_RS_SKIP_SWIFT=1` is the sanctioned escape hatch for
+    // check-only workflows and is required by the project guidelines; an
+    // earlier revision of this branch dropped it, which turned a machine
+    // without Xcode from "degrades gracefully" into "hard fails".
+    if Command::new("swift").arg("--version").output().is_ok() {
+        compile_swift();
+    } else if std::env::var("COREML_RS_SKIP_SWIFT").as_deref() == Ok("1") {
+        println!("cargo:warning=Swift compiler not found. Skipping Swift compilation (COREML_RS_SKIP_SWIFT=1).");
+        return;
+    } else {
+        panic!("Swift compiler not found. Install Xcode or set COREML_RS_SKIP_SWIFT=1 for check-only builds.");
+    }
 
     // 3. Link to Swift library
     println!("cargo:rustc-link-lib=static=swift-library");
