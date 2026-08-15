@@ -603,8 +603,11 @@ pub struct CoreMLModel {
     /// Swift-side `self.outputs = [:]` reset; bindings are single-shot.
     #[cfg(target_os = "macos")]
     iosurface_bound_outputs: HashSet<String>,
-    /// Keep model asset buffer alive for the duration of the model's life.
-    _model_asset_buffer: Option<Vec<u8>>,
+    // NOTE: there is deliberately no `_model_asset_buffer` field here.
+    // Buffer-backed models transfer their allocation to Swift, whose
+    // `Data(bytesNoCopy:deallocator:)` frees it via `rust_vec_free_u8` — see
+    // `CoreMLModel::load_buffer`. Retaining the `Vec` here as well gave the
+    // allocation two owners and double-freed it.
 }
 
 unsafe impl Send for CoreMLModel {}
@@ -650,17 +653,49 @@ impl CoreMLModel {
             output_buffers: Default::default(),
             #[cfg(target_os = "macos")]
             iosurface_bound_outputs: Default::default(),
-            _model_asset_buffer: None,
         }
     }
 
-    pub fn load_buffer(mut buf: Vec<u8>, info: CoreMLModelInfo) -> Self {
+    /// Load a model from an in-memory `.mlmodel` buffer.
+    ///
+    /// # Buffer ownership
+    ///
+    /// The allocation is *transferred* to Swift; it has exactly one owner at
+    /// every point and is never owned on both sides at once.
+    ///
+    /// 1. Before the call, `buf` owns the allocation.
+    /// 2. `modelWithAssets` is the Swift `initWithCompiledAsset`, which
+    ///    immediately wraps the pointer in `Data(bytesNoCopy:deallocator:)`
+    ///    with a custom deallocator that calls `rust_vec_free_u8`. That
+    ///    `Data` is constructed *before* the `do`/`catch` around
+    ///    `MLModelAsset(specification:)`, so Swift takes ownership on both
+    ///    the success and the load-failure path — there is no path on which
+    ///    Swift declines the buffer and hands it back.
+    /// 3. `Box::into_raw` therefore leaks the allocation on the Rust side on
+    ///    purpose: from here on Swift is the sole owner, and `rust_vec_free_u8`
+    ///    is the sole free.
+    ///
+    /// Consequently the model must **not** also retain the buffer in a field.
+    /// Doing so gave the allocation two owners — Swift's deallocator and the
+    /// retained `Vec` — and every buffer-backed model double-freed once both
+    /// sides dropped.
+    ///
+    /// The buffer is normalized to a boxed slice first because
+    /// `rust_vec_free_u8(ptr, len)` reconstructs `Vec::from_raw_parts(ptr,
+    /// len, len)`, i.e. it assumes capacity equals length. A `Vec` with spare
+    /// capacity would otherwise be deallocated under a smaller layout than it
+    /// was allocated with (and a `Vec::with_capacity(n)` that is still empty
+    /// would leak all `n` bytes). `into_boxed_slice` shrinks to fit,
+    /// reallocating only when there is spare capacity, so `len == capacity`
+    /// holds for the pointer Swift receives.
+    pub fn load_buffer(buf: Vec<u8>, info: CoreMLModelInfo) -> Self {
+        let buf = buf.into_boxed_slice();
+        let len = buf.len();
+        // Ownership moves to Swift here — see the note above.
+        let ptr = Box::into_raw(buf) as *mut u8;
+
         let model = Self::apply_options(
-            modelWithAssets(
-                buf.as_mut_ptr(),
-                buf.len() as isize,
-                info.opts.compute_platform,
-            ),
+            modelWithAssets(ptr, len as isize, info.opts.compute_platform),
             &info.opts,
         );
 
@@ -672,7 +707,6 @@ impl CoreMLModel {
             output_buffers: Default::default(),
             #[cfg(target_os = "macos")]
             iosurface_bound_outputs: Default::default(),
-            _model_asset_buffer: Some(buf),
         }
     }
 
