@@ -1,0 +1,24 @@
+swift-library/Sources/swift-library/swift_library.swift
+  s_1e3d43461640b3::t_989ff54c8af528 171-174,177-180,186-189
+  s_1e3d43461640b3::t_e34a35164f8b5f 194-214
+  s_1e3d43461640b3::t_5c86be5675b1df 1260-1269,1281
+  s_1e3d43461640b3::t_dfb8ddb8409cd0 1381-1388,1400
+  s_1e3d43461640b3::t_ca88403e27da72 874-886,888-897
+  s_1e3d43461640b3::t_6eb9d8ead38a14 268-271,273,277-280,282
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "a2289fa45b4d1dea7684cc163bed57e04b6ca3d5",
+  "prompts": {},
+  "sessions": {
+    "s_1e3d43461640b3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fcc6e37d-e664-4ab9-8157-1cbb6a0dcee9",
+        "model": "claude-opus-5"
+      },
+      "human_author": "maxi boch <maxi@maxibookair26black.warbler-tawny.ts.net>"
+    }
+  }
+}
