@@ -1,0 +1,52 @@
+# maxi-config-owned Maxi review gate workflow.
+# Source of truth: maxi-config/maxi-review/review-gate.yml
+# Fanned out by scripts/sync-maxi-review.sh; edit it there, not here.
+#
+# Refuses a PR with unresolved review threads, or with no review from anyone
+# other than its author.
+
+name: Review Gate
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
+  pull_request_review:
+    types: [submitted, dismissed]
+  # Resolving a conversation emits NO pull_request or pull_request_review
+  # event, and there is no Actions trigger that covers it. This previously
+  # listed `pull_request_review_thread`, which is a webhook delivered to GitHub
+  # Apps and NOT a valid workflow trigger: GitHub rejected the whole file with
+  # "(Line: 19, Col: 3): Unexpected value 'pull_request_review_thread'", a
+  # startup failure that created zero jobs. So from the day this gate was added
+  # it never ran in ANY repo — nothing was enforcing unresolved threads or
+  # non-author review anywhere in the org.
+  #
+  # The gap is real and is accepted deliberately: a gate that occasionally
+  # needs a re-run beats one that never runs. After resolving the last thread,
+  # re-run this check from the PR's checks tab, or push to the branch. Do not
+  # re-add the trigger to close it — it invalidates the file.
+  # A diff comment created straight through the review-comment API is not
+  # submitted as a review, so it emits neither of the events above while
+  # still opening a NEW unresolved thread -- a green check would stay
+  # green. Deleting one can strand an old failure the same way. There is
+  # no thread-created event, so this is the only trigger that covers it.
+  pull_request_review_comment:
+    types: [created, deleted]
+
+permissions: {}
+
+concurrency:
+  group: review-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review-gate:
+    uses: maxi-tools/maxi-config/.github/workflows/review-gate-reusable.yml@main
+    # `pull-requests: read` is what the gate actually spends: its two paginated
+    # GraphQL queries read this PR's reviews and its review threads to decide
+    # whether any thread is still unresolved. It only reads them — the verdict
+    # is the job's own outcome, not a comment or a label — so write scope would
+    # be strictly more than the gate can use.
+    permissions:
+      contents: read
+      pull-requests: read
