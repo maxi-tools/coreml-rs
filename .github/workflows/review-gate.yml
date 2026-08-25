@@ -81,17 +81,12 @@ concurrency:
 jobs:
   review-gate:
     uses: maxi-tools/maxi-config/.github/workflows/review-gate-reusable.yml@main
-    # `pull-requests: read` is what the gate actually spends: its two paginated
-    # GraphQL queries read this PR's reviews and its review threads to decide
-    # whether any thread is still unresolved. It only reads them — the verdict
-    # is the job's own outcome, not a comment or a label — so write scope would
-    # be strictly more than the gate can use.
+    # `pull-requests: read` lets the gate inspect this PR's reviews and review
+    # threads. `statuses: write` lets it report the resulting verdict as a
+    # commit status; reusable workflows cannot elevate the caller's token.
     permissions:
       contents: read
       pull-requests: read
-      # For the `review-gate` commit status the reusable workflow posts. This has to be
-      # granted HERE: a reusable workflow cannot elevate the token its caller hands it,
-      # so `statuses: write` in review-gate-reusable.yml alone buys nothing -- the POST
-      # returns a permission error, continue-on-error swallows it, and the context is
-      # never published at all. (codex P1, #378.)
+      # Without this caller grant, the status POST fails and no verdict context
+      # is published. (codex P1, #378.)
       statuses: write
