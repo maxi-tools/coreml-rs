@@ -6,6 +6,35 @@ on:
 
 jobs:
   claude-review:
+    # NOT maxi-config's own fan-out. The distributor pushes every payload on a
+    # branch named maxi-config-sync/<manifest> and opens the PR as
+    # maxi-tools-auth[bot], and what it carries is a byte-for-byte copy of a
+    # payload already reviewed on the maxi-config PR that changed it. Reviewing
+    # it here re-derives one verdict once per repo, on the same self-hosted lane
+    # this repo's real CI needs.
+    #
+    # It did not merely waste budget, it FAILED CLOSED: claude-code-action
+    # refuses a non-human actor outright -- "Workflow initiated by non-human
+    # actor: maxi-tools-auth (type: Bot)" -- so every sync PR landed red on a
+    # check no push could turn green. (maxi-mux#358, run 33598277378.)
+    #
+    # THE AUTHOR IS CHECKED TOO, and the condition is the De Morgan of "skip
+    # when it is the fan-out": run unless the branch prefix AND the identity
+    # both say fan-out. A head ref is chosen by whoever pushes the branch, so
+    # the prefix alone would let anyone opt out of review by naming a branch.
+    # This matches maxi-config's own maxi-review.yml and pr_review_gate.py,
+    # which gate their fan-out bypass on the same pair and must not disagree.
+    #
+    # Spelled maxi-tools-auth[bot] WITH the suffix: github.event.* is the raw
+    # webhook payload, i.e. REST shape, and REST spells a Bot actor with the
+    # suffix. The action's own error prints the bare GraphQL slug; the two APIs
+    # differ, and this expression reads the REST one.
+    if: >
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      (
+        startsWith(github.head_ref, 'maxi-config-sync/') == false ||
+        github.event.pull_request.user.login != 'maxi-tools-auth[bot]'
+      )
     runs-on: [self-hosted, linux, x64]
     permissions:
       contents: read
