@@ -1,0 +1,19 @@
+src/lib.rs
+  s_1e3d43461640b3::t_4e5bdf6f7e72b6 42
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "ed17429d748fe44dd50070340cff8b5de6248e15",
+  "prompts": {},
+  "sessions": {
+    "s_1e3d43461640b3": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "fcc6e37d-e664-4ab9-8157-1cbb6a0dcee9",
+        "model": "claude-opus-5"
+      },
+      "human_author": "maxi boch <maxi@maxibookair26black.warbler-tawny.ts.net>"
+    }
+  }
+}
