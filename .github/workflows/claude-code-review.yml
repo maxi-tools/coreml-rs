@@ -1,8 +1,44 @@
+# MAXI_REVIEW_SYNC_OPTOUT
+#
+# THIS FILE IS OWNED BY THIS REPOSITORY, NOT BY maxi-config, AND THE MARKER
+# ABOVE IS WHY. maxi-config's `claude-review` manifest distributes a canonical
+# claude-code-review.yml to the 23 repositories that run one, and that payload
+# calls a REUSABLE WORKFLOW -- maxi-config/.github/workflows/review-plan.yml --
+# to resolve the review model and the runner from central policy.
+#
+# coreml-rs cannot call it. maxi-config is PRIVATE with
+# `access_level: organization`, which admits every PRIVATE repository in
+# maxi-tools; this repository is PUBLIC, and a public repository cannot call a
+# private organisation reusable workflow. The run is created and then dies with
+# ZERO jobs, no log, and no check run at all.
+#
+# Measured here, not assumed. `.github/workflows/review-gate.yml` in this
+# repository already calls
+# `maxi-tools/maxi-config/.github/workflows/review-gate-reusable.yml@main`, and
+# its runs 34272440913, 34272130549 and 34270996902 (2026-09-08) are all
+# `failure` with an empty job list, while maxi-libs -- private, byte-identical
+# file -- runs the same three jobs green. So this repository's review gate has
+# never once executed. That is tracked separately; it is the same root cause.
+#
+# The marker makes scripts/sync-maxi-review.sh skip this repository rather than
+# hand it a workflow that cannot start. It is ONE LINE and reversible: delete it
+# and the next fan-out adopts this file. The two ways to get there are to make
+# this repository private, or to make review-plan.yml reachable from a public
+# caller. Until one of those happens, everything below is maintained by hand,
+# which is what the rest of this commit does.
+
 name: Claude Code Review
 
 on:
   pull_request:
-    types: [opened, synchronize, ready_for_review, reopened]
+    # `ready_for_review` only, matching the canonical payload's decision rather
+    # than diverging from it for no reason. The wide list here was drift: the
+    # commit that narrowed it fleet-wide ("Only run Claude review on
+    # ready_for_review, not every push", 2026-03-04) never reached this repo.
+    # Across the fleet the six repos that kept the wide list produced 376 of 388
+    # runs in the 30 days to 2026-09-08; the seventeen narrow ones produced
+    # about twelve between them.
+    types: [ready_for_review]
 
 jobs:
   claude-review:
@@ -35,22 +71,56 @@ jobs:
         startsWith(github.head_ref, 'maxi-config-sync/') == false ||
         github.event.pull_request.user.login != 'maxi-tools-auth[bot]'
       )
+    # UNCHANGED, and stated so it is a decision rather than an oversight. This
+    # job checks out pull-request content on a persistent box -- runs
+    # 34270996631, 34270405250 and 34269471279 landed on ml-node-3, ml-node-4
+    # and maxicoconut-1 -- and this is the one PUBLIC repository in the fleet.
+    # What keeps that sound is the fork conjunct in the `if:` above: a fork pull
+    # request never reaches this job, so the code that runs here was pushed to a
+    # branch in this repository by somebody who already has write access to it,
+    # which is the authorship bar ci/runner-routing.toml states.
+    #
+    # The canonical payload expresses the same bar through the planner, by
+    # numeric actor ID, and routes anything it cannot vouch for to an ephemeral
+    # hosted runner. This file cannot reach the planner (see the header), so it
+    # keeps the coarser guard it already had.
     runs-on: [self-hosted, linux, x64]
+    # 20 minutes. There was no timeout, so a wedged agent could hold one of
+    # these boxes for GitHub's 360-minute default.
+    timeout-minutes: 20
     permissions:
       contents: read
       pull-requests: write
       issues: write
-      id-token: write
+      # `id-token: write` REMOVED. Read at the pinned action revision:
+      # src/github/token.ts returns OVERRIDE_GITHUB_TOKEN immediately when the
+      # `github_token` input is set and only calls core.getIDToken() when it is
+      # not, and action.yml scopes id-token to workload identity federation,
+      # which this workflow does not use. `github_token:` is passed below, so
+      # the OIDC path is unreachable and the permission minted a token nothing
+      # read.
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        # SHA-pinned, and `persist-credentials: false`. A floating `@v4` on a
+        # job that checks out pull-request content onto a shared, persistent
+        # runner is the part of this file that could not wait for a visibility
+        # decision. `persist-credentials: false` matters here for the same
+        # reason: these runners reuse their workspace between jobs, so a
+        # credential left in .git/config outlives the job that fetched it.
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Run Claude Code Review
         id: claude-review
-        uses: anthropics/claude-code-action@v1
+        # The commit `v1` resolved to on 2026-09-08, verified two ways:
+        # git/ref/tags/v1 is annotated tag b7912aee, which dereferences to this
+        # commit, and v1.0.217 (tag ef7878a0) dereferences to the same one. So
+        # pinning changes what this repository runs by nothing at all -- it only
+        # stops the revision moving under it.
+        uses: anthropics/claude-code-action@9c5ddab2e6d17b83ea679153b31f1d5f023cf636 # v1.0.217
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -60,7 +130,12 @@ jobs:
             - Performance problems
             - Code style and readability concerns
 
-            Post your review using `gh pr review` with inline comments for specific issues.
-            Use --comment for general feedback, --request-changes for bugs/security issues.
-            If the code looks good, approve with --approve and a brief summary.
+            Post your review with `gh pr review`. Use --comment for general
+            feedback and --request-changes for bugs or security issues.
+
+            Do NOT use --approve. This organisation sets
+            can_approve_pull_request_reviews: false, so GITHUB_TOKEN is refused
+            when it tries to approve a pull request and the call fails; the
+            setting is deliberate and is not going to be changed
+            (maxi-config#595). If the code looks good, say so with --comment.
           claude_args: '--allowedTools Bash(gh pr review:*) Bash(gh pr diff:*) Bash(gh api:*)'

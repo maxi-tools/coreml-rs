@@ -10,13 +10,48 @@ on:
   pull_request_review:
     types: [submitted]
 
+# Trust model:
+# - This repository is PUBLIC, and every trigger above is one that runs from the
+#   DEFAULT branch with secrets in scope. Unlike `pull_request` from a fork,
+#   `issue_comment` and friends are NOT covered by the outside-contributor
+#   approval gate, so before this gate existed any GitHub user could start the
+#   job by writing `@claude` in a comment. The content test was doing all of the
+#   filtering; there was no identity check at all.
+# - What the `if:` below gates is WHO WROTE THE TRIGGERING TEXT, not where the
+#   code came from. Three arms check the comment or review author's
+#   author_association; the `issues` arm checks the ISSUE author's, so under
+#   `issues: assigned` the account that assigned is not the account that was
+#   checked. That is tolerable only because assignment already requires triage
+#   access -- it is not an actor check. All four require OWNER, MEMBER or
+#   COLLABORATOR. (Mirrors maxi-core: .github/workflows/claude.yml.)
+# - So this is an authorization gate on the INVOKER, not a provenance gate on
+#   the REVISION -- and those two come apart. An `@claude` posted by a member on
+#   an outside contributor's fork pull request passes this gate, and the action
+#   then works on outsider-authored code on a persistent machine.
+# - On runner placement, read the CURRENT posture, not the older one. maxi-core's
+#   .shellcheckrc says persistent self-hosted machines never execute
+#   pull-request code at all, including from trusted members. maxi-config's
+#   ci/runner-routing.toml [lanes.linux-x64-ephemeral-review] explicitly
+#   supersedes that framing: "The posture is now about AUTHORSHIP, not about
+#   pull requests as a category. The risk was never 'a pull request' -- it is
+#   code from someone who cannot already push to these boxes." A pull request
+#   authored by a trusted actor (ci/review-trusted-actors.toml) off a branch in
+#   this repository may stay on self-hosted; the ephemeral lane remains correct
+#   for "forks, Dependabot, and any author not in the policy".
+# - That same file says "authorship decides, and the decision belongs in the
+#   WORKFLOW, which has the author, not in the resolver, which does not." This
+#   `if:` is that decision -- but only for the invoker. The unresolved case is a
+#   trusted invoker aiming the job at an untrusted revision, which is exactly
+#   what the ephemeral lane exists for. Routing that case is a separate change,
+#   deliberately not settled by this file.
+
 jobs:
   claude:
     if: |
-      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude')) ||
-      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude')) ||
-      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')))
+      (github.event_name == 'issue_comment' && contains(github.event.comment.body, '@claude') && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
+      (github.event_name == 'pull_request_review_comment' && contains(github.event.comment.body, '@claude') && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
+      (github.event_name == 'pull_request_review' && contains(github.event.review.body, '@claude') && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association)) ||
+      (github.event_name == 'issues' && (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude')) && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.issue.author_association))
     runs-on: [self-hosted, linux, x64]
     permissions:
       contents: read
