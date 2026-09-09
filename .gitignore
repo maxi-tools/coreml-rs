@@ -7,7 +7,7 @@ model_cache
 .DS_Store
 
 # AI agent configs
-.claude/
+.claude
 .codex/
 .augment/
 .copilot/
