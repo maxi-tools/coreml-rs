@@ -13,12 +13,38 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review, labeled]
 
-concurrency:
-  group: maxi-review-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+# No workflow-level concurrency group.
+#
+# A workflow-level group is PR-wide and cancels the whole run, so it takes the
+# `review` job with it; a job-level `cancel-in-progress: false` cannot override
+# a cancellation issued at the workflow level. Because `review` also excludes
+# `synchronize`, the replacement run starts no review, and the PR ends with no
+# completed AI review -- indistinguishable on the PR face from a review that
+# ran and found nothing (cubic, P1 on #621).
+#
+# Cancellation belongs to the cheap half only, so it is declared per job:
+# lint-gate cancels, review does not.
 
 jobs:
   lint-gate:
+    # Superseded lint verdicts are worthless and restarting is cheap, so this
+    # half keeps the cancel-on-push behaviour the workflow-level group used to
+    # provide -- scoped to this job so it cannot reach `review`.
+    #
+    # Keyed on the ACTION as well as the PR, so a run only ever cancels work
+    # doing the same job. With one group per PR, a `synchronize` run cancelled
+    # the lint-gate of an `opened`/`reopened`/`ready_for_review`/`labeled` run;
+    # that run's `review` then failed its `needs: lint-gate` + `success()`
+    # gate, and the `synchronize` run skips `review` by design -- so the review
+    # vanished with nothing replacing it. Same disappearance as the
+    # workflow-level group produced, reached by a different path
+    # (CodeRabbit, Major on #621).
+    #
+    # Two pushes in a row still cancel each other, which is the point: both are
+    # `synchronize`, so they are competing attempts at one task.
+    concurrency:
+      group: maxi-review-lint-${{ github.event.pull_request.number }}-${{ github.event.action }}
+      cancel-in-progress: true
     # Same-repository only: this job uses org app credentials to install the
     # private maxi-lint scanner. It checks changed files only and fails solely
     # on deny-level deterministic findings.
@@ -375,12 +401,64 @@ jobs:
 
   review:
     needs: lint-gate
+    # Its own group, and deliberately NOT cancel-in-progress.
+    #
+    # Cancellation is declared on lint-gate instead of at workflow level
+    # precisely so it cannot reach this job. A `synchronize` run must not kill
+    # a review that is mid-flight, because the same push is filtered out by the
+    # `if:` below and nothing would replace it: the PR would end with no
+    # completed AI review, which on the PR face is indistinguishable from a
+    # review that ran and found nothing.
+    #
+    # That failure did not exist before the once-per-PR filter, because the
+    # filter was a tautology and every push started a fresh review behind the
+    # cancellation. Fixing the tautology is what exposed it (cubic, P1 on this
+    # PR). The two halves have to move together.
+    #
+    # Keyed on the PR so two reviews of the SAME pull request still serialise
+    # -- someone re-labelling twice in quick succession queues rather than
+    # racing -- while a push no longer interrupts one.
+    concurrency:
+      group: maxi-review-ai-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
     # Same fan-out exclusion as lint-gate, restated rather than inherited:
     # `always()` here means a SKIPPED lint-gate does not skip this job, so
     # excluding only lint-gate would leave the AI reviewer -- the expensive
     # half -- running on all ~31 copies anyway.
+    # `success()`, NOT `always()`. Under `always()` a FAILED lint-gate did not
+    # stop this job, so a PR that could not pass deterministic maxi-lint still
+    # spent a full AI review: the expensive half ran precisely when the cheap
+    # half had already found the answer. `needs: lint-gate` was ordering
+    # without gating.
+    #
+    # The fan-out exclusion below is now redundant on the skip path, since a
+    # skipped lint-gate no longer satisfies `success()`. It stays anyway: it is
+    # the condition a reader checks to answer "why was the fan-out not
+    # reviewed", and it should hold on its own terms if lint-gate's exclusion
+    # ever changes.
+    #
+    # `github.event.action != 'synchronize'` is what stops the re-review per
+    # push. It must be `event.action`, NOT `event_name`: this workflow triggers
+    # on `pull_request`, so `event_name` is the literal string "pull_request"
+    # for every type in that list and `event_name != 'synchronize'` is a
+    # tautology that filters nothing. The activity type lives in `event.action`.
+    #
+    # Recovering from a first push that fails lint-gate: `success()` skips the
+    # review, and later pushes are `synchronize` and skip too, so the PR does
+    # not review itself once the lint is fixed. That is deliberate, and the
+    # recovery is the `labeled` trigger plus `run-maxi-review` already in this
+    # condition -- adding the label re-runs the review on demand. The
+    # alternative, reviewing on every `synchronize` until one succeeds, is the
+    # 3.3x re-review this change exists to stop.
+    # MEASURED before this change: 100 Maxi Review runs covered 30 branches in
+    # maxi-dist (3.3 per branch, worst 13) and 37 in maxi-config (2.7, worst
+    # 13), with 18% and 29% cancelled mid-flight by the concurrency group --
+    # work started and thrown away. lint-gate deliberately KEEPS running on
+    # every push: it is a merge gate, and a gate that stops looking after the
+    # first commit is not one.
     if: >
-      always() &&
+      success() &&
+      github.event.action != 'synchronize' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.actor != 'dependabot[bot]' &&
       (
@@ -592,7 +670,7 @@ jobs:
           # runs the action that consumes them. Split them and the reviewer
           # grades with one revision's code against another revision's rules —
           # a mismatch nothing else in this workflow would surface.
-          ref: f772893df470bf0749e32ba6e916fad1166d3d63
+          ref: c6dcc726ae8aeffc316ba1951b670db4c69ec0d5
           path: .maxi-reviewer-rules
           sparse-checkout: rules
           persist-credentials: false
@@ -636,6 +714,69 @@ jobs:
       # defaulting to timeout_minutes + 20 = 35. Nothing in this file moves for
       # it: the step bound below is already 40, picked so this pin could
       # advance without dragging the timeout arithmetic behind it.
+      # Which Jules account reviews this PR.
+      #
+      # maxi-reviewer takes ONE jules_api_key, so alternating has to happen
+      # here. Two accounts exist, and until now every review across ~90 repos
+      # went to the same one -- which is the shape of the failure this workflow
+      # keeps reporting: "No review after 15 min: Jules never replied."
+      #
+      # The index is (PR number + run attempt), for two properties:
+      #
+      #   - Deterministic per PR per attempt, so every job in a run agrees on
+      #     the account and one review is never split across two sessions.
+      #   - A RE-RUN LANDS ON THE OTHER ACCOUNT. That is the point. The advice
+      #     attached to a timeout is "re-runs often pass", and re-running
+      #     against the account that just failed to answer is the weakest
+      #     version of that. Incrementing on run_attempt makes a retry a real
+      #     retry rather than the same request again.
+      #
+      # Degrades to one account: with JULES_API_KEY_2 unset this always picks
+      # primary, so the file is unchanged in behaviour for an org with one key.
+      - name: Choose a Jules account
+        id: jules_account
+        # Explicit, not inherited. The script uses `set -o pipefail` and shell
+        # arithmetic; the default shell is bash on these runners today, but a
+        # step that only works because of a default is a step that breaks when
+        # the default moves.
+        shell: bash
+        env:
+          # Comparing to '' proves the secret EXISTS without reading it; only a
+          # boolean reaches the script.
+          HAVE_SECOND: ${{ secrets.JULES_API_KEY_2 != '' }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          if [ "$HAVE_SECOND" != "true" ]; then
+            echo "use=primary" >> "$GITHUB_OUTPUT"
+            echo "one Jules key configured; using it"
+            exit 0
+          fi
+          # Both values come from GitHub and are integers, but they are read
+          # from the environment rather than interpolated into this script: a
+          # run block is not where you want to discover an expression was not
+          # what you assumed.
+          # Each value checked SEPARATELY. Concatenating them hid the case
+          # that actually occurs: on a non-pull_request event PR_NUMBER is
+          # empty, so "$PR_NUMBER$RUN_ATTEMPT" is just "1" -- numeric, guard
+          # passes, and the arithmetic below then runs with a missing operand.
+          for v in "$PR_NUMBER" "$RUN_ATTEMPT"; do
+            case "$v" in
+              *[!0-9]*|"")
+                echo "use=primary" >> "$GITHUB_OUTPUT"
+                echo "no usable index (pr='$PR_NUMBER' attempt='$RUN_ATTEMPT'); using primary"
+                exit 0 ;;
+            esac
+          done
+          if [ $(( (PR_NUMBER + RUN_ATTEMPT) % 2 )) -eq 0 ]; then
+            use=primary
+          else
+            use=secondary
+          fi
+          echo "use=$use" >> "$GITHUB_OUTPUT"
+          echo "PR $PR_NUMBER attempt $RUN_ATTEMPT -> $use"
+
       - name: Run maxi-reviewer
         # ~37% of invocations used to hang with no step output and hold a scarce
         # self-hosted runner until the job timeout (maxi-reviewer#53).
@@ -652,8 +793,11 @@ jobs:
         # timers firing, which is why this outer bound is the real
         # runner-release watchdog.
         #
-        # That arithmetic only became true of the FLEET when the pin advanced
-        # to f772893 above. The previous pin, ae2700a, predated
+        # That arithmetic first became true of the FLEET at pin f772893, and it
+        # still holds at the pin below: both carry src/hard-deadline.ts and the
+        # `hard_timeout_minutes` input, checked against each revision before
+        # moving the pin, so advancing it changes nothing about the timeout
+        # regime. The pin BEFORE f772893, ae2700a, predated
         # src/hard-deadline.ts entirely — no `hard_timeout_minutes` input, no
         # deadline timer in its dist — so this bound was the only thing
         # releasing the runner, and it had to cover setup plus the whole poll
@@ -662,9 +806,35 @@ jobs:
         # number moving with it. Whenever `timeout_minutes` moves, this does:
         # timeout_minutes + 25.
         timeout-minutes: 40
-        uses: maxi-tools/maxi-reviewer@f772893df470bf0749e32ba6e916fad1166d3d63
+        uses: maxi-tools/maxi-reviewer@c6dcc726ae8aeffc316ba1951b670db4c69ec0d5
         with:
-          jules_api_key: ${{ secrets.JULES_API_KEY }}
+          # Which account, chosen by the step above. The KEY itself is read
+          # straight from `secrets` here rather than passed through a step
+          # output, so the value never becomes an output that could be printed.
+          jules_api_key: ${{ steps.jules_account.outputs.use == 'secondary' && secrets.JULES_API_KEY_2 || secrets.JULES_API_KEY }}
+          # The OTHER account -- the inverse of the line above -- used only
+          # when a session never leaves repository setup. The reviewer
+          # recreates it there rather than waiting out a budget that cannot
+          # produce a review; see maxi-reviewer#100.
+          #
+          # Degrades to a same-account recreate in BOTH directions, which is
+          # still the cheapest thing that recovers a clone that never finished:
+          #
+          #  - JULES_API_KEY_2 unset: this renders empty, and the reviewer
+          #    reads an empty fallback as "no second account".
+          #  - JULES_API_KEY unset while the selection picked secondary: a
+          #    GitHub `A && B || C` yields C whenever B is falsy, so this
+          #    renders as JULES_API_KEY_2 -- the key already in use. There is
+          #    no expression that preserves an empty string here instead;
+          #    adding a second condition renders the literal "false", which is
+          #    worse. The reviewer covers it: `planAttempts` takes the
+          #    fallback only when it is non-empty AND differs from the active
+          #    key, so an identical one plans a fresh session on the same
+          #    account rather than a pointless switch to itself.
+          #
+          # Read straight from `secrets` for the same reason as the primary:
+          # the value never becomes a step output that could be printed.
+          jules_api_key_fallback: ${{ steps.jules_account.outputs.use == 'secondary' && secrets.JULES_API_KEY || secrets.JULES_API_KEY_2 }}
           github_token: ${{ steps.app-token.outputs.token }}
           rules_file: ""
           extra_instructions: |
@@ -705,6 +875,81 @@ jobs:
           # in-process hard deadline is timeout_minutes + 20 and the step bound
           # must clear it by ~5 minutes of cleanup headroom.
           timeout_minutes: "15"
-          fail_on: "blocking"
+          # NEVER, and the context name is the short version of why: a status
+          # called `advisory:` that fails the check is not advisory. These two
+          # lines sat adjacent and contradicting for as long as they have both
+          # existed, and unlike every other input in this block, neither
+          # carried a reason.
+          #
+          # Three things this lane reports are not verdicts on the code:
+          #
+          #   1. Its own timeouts. The comment above measures three runs in
+          #      seven that spent the whole budget and returned nothing, then
+          #      "set `advisory: maxi reviewer` red for having failed to work".
+          #      Reviewer infrastructure failing is not a finding.
+          #   2. Blocking verdicts its own rules forbid. maxi-reviewer's
+          #      src/prompt.ts already says that for claims about third-party
+          #      tools and APIs, "if you are relying only on memory of an
+          #      external API, mention the uncertainty and do not use `block`".
+          #      Observed 2026-09-09 on maxi-kvm#85: High severity, High
+          #      confidence, verdict `block`, asserting that
+          #      actions/create-github-app-token requires `app-id` and rejects
+          #      `client-id`. Upstream documents the opposite -- `client-id` is
+          #      recommended and `app-id` is the legacy input -- so applying
+          #      that finding would have broken the token step it claimed to
+          #      repair. The rule is right; nothing enforces it.
+          #   3. Verdicts about a diff it did not read. The same run recorded
+          #      the new head SHA against a review of superseded content.
+          #
+          # Nothing is lost by going advisory in fact as well as in name. The
+          # findings still publish as PR review comments, and `maxi-reviewer[bot]`
+          # still counts for `review-gate/non-author-review`, which reads
+          # reviews rather than statuses. What goes away is a red check that
+          # ~90 repositories' pull requests wait on, which is red for reasons
+          # its own precision does not support.
+          #
+          # The condition for returning this to "blocking" is a measurement,
+          # not a feeling: maxi-reviewer/src/calibration.ts already aggregates
+          # per-rule precision from harvested artifacts. Point it at the block
+          # verdicts and raise this again when that number justifies a gate.
+          fail_on: "never"
           status_context: 'advisory: maxi reviewer'
           analyzer_mode: "off"
+          # Explicit, and empty. maxi-reviewer's action.yml defaults
+          # `bypass_label` to "maxi-review-override", so leaving this unset does
+          # NOT mean "no bypass" -- it means a bypass this repository never
+          # spells anywhere, which is why `grep maxi-review-override` finds
+          # nothing in any of the ~31 repos this file lands in.
+          #
+          # Measured on maxi-config#536 (issue #555). With the label applied,
+          # `Run maxi-reviewer` logged one line -- `Bypass label
+          # "maxi-review-override" present - skipping review.` -- returned in
+          # ~0.1s, published NO `advisory: maxi reviewer` status at all, and
+          # concluded `success` under this job's `continue-on-error: true`. An
+          # invisible skip, not a red one: on the PR page it is indistinguishable
+          # from a lane that has not reported yet.
+          #
+          # And it skipped the wrong half of the system. `maxi-reviewer[bot]` is
+          # one of the non-author reviewers that satisfies
+          # `review-gate/non-author-review`, and the gate reads reviews, never
+          # labels -- so the documented escape hatch ("Bypass Maxi Review when
+          # review infrastructure is unavailable") removed a reviewer while
+          # leaving intact the requirement that a reviewer exist. A PR carrying
+          # it was STRICTLY LESS mergeable, in exactly the situation the label
+          # was built for.
+          #
+          # The capability is not deleted, it moved to the half that is
+          # load-bearing: `review-infra-unavailable` is honoured by
+          # .github/actions/pr-review-gate. Suppressing the reviewer never
+          # helped anyway -- a reviewer that RUNS and fails publishes `advisory:
+          # maxi reviewer` red, which is the evidence that the infrastructure is
+          # down; skipping it destroys that evidence.
+          #
+          # An explicitly supplied empty string overrides an action.yml default:
+          # `rules_file: ""` three lines up already relies on that, and
+          # maxi-reviewer's action.yml documents it ("Set to empty string to
+          # disable"). No label is named "", so no label bypasses.
+          # tests/ci_economy_assets.rs pins this line in BOTH copies, because
+          # deleting it does not fail anything at runtime -- it silently
+          # reinstates the default.
+          bypass_label: ""
