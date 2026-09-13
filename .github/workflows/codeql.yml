@@ -85,14 +85,29 @@ jobs:
     # decision 5062804 already took for clippy, maxi-review, qodana and
     # rust-ci, and verify-fanout-tests took after it.
     #
-    # The `if` below is the mitigation those carry: same-repo pull requests
-    # only. A fork's pull request skips this job rather than running its code
-    # on a box that keeps a shared cargo directory, a shared sccache and a
-    # docker socket between jobs. Push, schedule and workflow_dispatch are
-    # unaffected -- `github.event_name != 'pull_request'` short-circuits.
+    # The first `if` below is the mitigation those carry: same-repo pull
+    # requests only. A fork's pull request skips this job rather than running
+    # its code on a box that keeps a shared cargo directory, a shared sccache
+    # and a docker socket between jobs. Push and schedule are unaffected --
+    # `github.event_name != 'pull_request'` short-circuits.
+    #
+    # workflow_dispatch is NOT unaffected, which is what the second clause is
+    # for. That first test admits a dispatch, and `gh workflow run --ref`
+    # accepts any branch -- so without it anyone with write access could point
+    # this workflow at a branch of their own and have the fleet run that
+    # branch's extractor configuration. A dispatch is a trigger, not a
+    # statement about who wrote the tree, so it is pinned to the owner by
+    # numeric id -- ci/review-trusted-actors.toml pins 874012, and an id
+    # cannot be reassigned the way a login can.
     if: >-
-      github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository
+      (
+        github.event_name != 'pull_request' ||
+        github.event.pull_request.head.repo.full_name == github.repository
+      ) &&
+      (
+        github.event_name != 'workflow_dispatch' ||
+        github.event.sender.id == 874012
+      )
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 5
     permissions:
@@ -137,10 +152,17 @@ jobs:
     needs: detect
     # Same guard as `detect`, restated rather than inherited: a reader of the
     # job that runs the extractors should not have to trace `needs` to learn
-    # what keeps fork code off the fleet.
+    # what keeps fork code -- and branch content dispatched by someone else --
+    # off the fleet.
     if: >-
-      github.event_name != 'pull_request' ||
-      github.event.pull_request.head.repo.full_name == github.repository
+      (
+        github.event_name != 'pull_request' ||
+        github.event.pull_request.head.repo.full_name == github.repository
+      ) &&
+      (
+        github.event_name != 'workflow_dispatch' ||
+        github.event.sender.id == 874012
+      )
     runs-on: [self-hosted, Linux, X64]
     # Default setup's slowest analyzer was rust at ~3.2 min on a hosted
     # 2-core box, on this repo. maxi-core's crate graph is an order of
@@ -172,6 +194,20 @@ jobs:
           client-id: ${{ secrets.APP_CLIENT_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: maxi-tools
+          # This token exists for one step: the `insteadOf` rewrite that lets
+          # `cargo fetch` resolve private maxi-tools git dependencies so the
+          # Rust extractor can build a crate graph. A read of contents.
+          #
+          # Unscoped it inherited the whole installation -- contents, workflows
+          # and actions write across all 73 org repos, plus
+          # organization_self_hosted_runners write -- for a scan that writes
+          # nothing but a SARIF upload (done with the job's own GITHUB_TOKEN).
+          # See maxi-config#581.
+          #
+          # Permissions only, no `repositories:`: this file is distributed to
+          # consumer repos whose private-dependency sets differ, and a list
+          # derived from one strands the rest (maxi-config#557).
+          permission-contents: read
 
       - name: Fetch private dependencies
         if: matrix.language == 'rust'
@@ -205,6 +241,15 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: none
+          # The EXTRACTOR's ceiling, which is a different phase from the
+          # evaluator's below and the one that actually OOMed. This action's own
+          # docs: "The amount of memory in MB that can be used by CodeQL
+          # extractors. By default, CodeQL extractors will use most of the
+          # memory available in the system." With `build-mode: none` the Rust
+          # extractor is the heavy phase, so capping only `analyze` would have
+          # left the failing path uncapped. Same 16 GiB budget; see the note
+          # there for how it is sized.
+          ram: 16384
 
       - name: Analyze
         uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4.37.9
@@ -212,3 +257,47 @@ jobs:
           # One category per language so the four uploads for one commit are
           # kept apart in code scanning instead of overwriting each other.
           category: /language:${{ matrix.language }}
+          # Cap the query evaluator's heap. Left unset, CodeQL sizes itself
+          # against TOTAL machine memory, and these boxes have ~123 GB with no
+          # swap -- so one Rust analysis grew to ~67 GB resident and the kernel
+          # took the whole machine out:
+          #
+          #   Out of memory: Killed process 546356 (java)
+          #     anon-rss:70130240kB
+          #     task_memcg=/system.slice/github-runner-ml-node-4.service
+          #     constraint=CONSTRAINT_NONE ... global_oom
+          #
+          # The runner reports that as `##[error]The operation was canceled.`
+          # partway through query evaluation, with every sibling language job
+          # succeeding -- which reads exactly like a flake and was misdiagnosed
+          # as one across two sessions (watchdog reclaim, then hosted
+          # contention). It is neither: the watchdog's smallest configured
+          # limit is 3600s x factor >= 1.0, i.e. 60 minutes, and these jobs die
+          # at 8-10 minutes. A run at 11m52s succeeded while one at 8m17s was
+          # killed, so it was never a duration bound.
+          #
+          # It is a memory bound, and it is a COLLISION, which is why it is
+          # intermittent: each host runs several runner services (maxibaobab
+          # six, ml-node four), so two heavy jobs share one machine. One
+          # analysis at 67 GB is survivable; two are not. maxi-core#3934-#3937
+          # made it reproducible by adding workspace members, giving the Rust
+          # extractor more to walk.
+          #
+          # 32 GB keeps two concurrent analyses inside RAM with ~59 GB left for
+          # everything else on the box, and is ample for the largest crate
+          # graph in the org. Fixed rather than proportional because
+          # `runs-on` is always this one Linux X64 pool, for every repo the
+          # fan-out reaches.
+          # 16 GiB, sized for the WORST case on the biggest host rather than
+          # for two jobs. maxibaobab serves six runner slots and ml-node four,
+          # and the fan-out gives every repo the same schedule, so six Rust
+          # analyses can land on one 123 GiB box at once. Six at 32 GiB would
+          # request 192 GiB and reproduce the very OOM this fixes; six at 16
+          # leaves ~27 GiB for the OS and the rest of each job, with the host's
+          # 32 GiB swap behind that as a backstop rather than a plan.
+          #
+          # If CodeQL starts failing on its own memory ceiling instead of the
+          # kernel's, the answer is fewer runner slots on the host or a
+          # staggered schedule -- not a bigger number here, which just moves the
+          # failure back to where it was.
+          ram: 16384
