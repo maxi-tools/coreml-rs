@@ -49,10 +49,10 @@ fn main() {
     // 1. Use `swift-bridge-build` to generate Swift/C FFI glue.
     //    You can also use the `swift-bridge` CLI.
     let bridge_files = vec!["src/swift.rs"];
-    swift_bridge_build::parse_bridges(bridge_files).write_all_concatenated(
-        staged_package.join("Sources/swift-library/generated"),
-        "rust-calls-swift",
-    );
+    let generated_dir = staged_package.join("Sources/swift-library/generated");
+    swift_bridge_build::parse_bridges(bridge_files)
+        .write_all_concatenated(&generated_dir, "rust-calls-swift");
+    export_cdecl_entry_points(&generated_dir);
 
     // 2. Compile Swift library.
     //
@@ -136,6 +136,45 @@ fn copy_tree(from: &Path, to: &Path) {
         } else {
             copy_file(&entry.path(), &target);
         }
+    }
+}
+
+/// Make every `@_cdecl` function swift-bridge generated `public`.
+///
+/// swift-bridge emits its C entry points as `@_cdecl("...") func ...` with
+/// the default `internal` access. Under `-O -whole-module-optimization`
+/// (every release build) the compiler gives internal symbols hidden
+/// visibility, and Xcode 27's Swift Build system then prelinks the static
+/// library's objects with `ld -r`, which turns hidden symbols into plain
+/// locals: `nm -m` reports `non-external (was a private external)` for
+/// `___swift_bridge__$modelWithPath` and the Rust link fails with
+/// "Undefined symbols for architecture arm64" although the archive is
+/// present. The native SwiftPM build system (Xcode ≤ 26, deprecated in 27)
+/// skipped the prelink, so the hidden symbols stayed linkable and the
+/// problem never showed. Entry points meant for a foreign linker are public
+/// API by definition; marking them so keeps them external under every
+/// combination of optimisation level and build system. Every parameter type
+/// they use is a pointer, a scalar, or a C type from the bridging header,
+/// all of which Swift treats as public, so the change compiles cleanly.
+fn export_cdecl_entry_points(generated_dir: &Path) {
+    for file in [
+        generated_dir.join("rust-calls-swift/rust-calls-swift.swift"),
+        generated_dir.join("SwiftBridgeCore.swift"),
+    ] {
+        let Ok(source) = fs::read_to_string(&file) else {
+            continue;
+        };
+        let mut out = String::with_capacity(source.len() + 512);
+        let mut after_cdecl = false;
+        for line in source.lines() {
+            if after_cdecl && line.starts_with("func ") {
+                out.push_str("public ");
+            }
+            out.push_str(line);
+            out.push('\n');
+            after_cdecl = line.trim_start().starts_with("@_cdecl(");
+        }
+        fs::write(&file, out).unwrap_or_else(|e| panic!("write {}: {e}", file.display()));
     }
 }
 
