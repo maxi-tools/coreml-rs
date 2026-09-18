@@ -88,8 +88,18 @@ fn compile_swift() {
     let swift_package_dir = manifest_dir().join("swift-library");
 
     let triple = std::env::var("TARGET").unwrap();
-    let parts = triple.split("-").collect::<Vec<_>>();
-    let arch = parts.first().unwrap();
+    // Rust spells Apple silicon `aarch64`; Xcode spells it `arm64`. The old
+    // SwiftPM native build system accepted either, but the Swift Build
+    // system that Xcode 27 makes the default validates ARCHS and, given
+    // `aarch64`, prints "None of the architectures in ARCHS (aarch64) are
+    // valid", builds no product and still exits 0 with "Build complete!" --
+    // after which rustc fails with "could not find native static library
+    // `swift-library`". Every maxi-ml lane on an Xcode 27 runner failed that
+    // way from 2026-09-16 until this mapping.
+    let arch = match triple.split('-').next().unwrap_or_default() {
+        "aarch64" => "arm64",
+        other => other,
+    };
 
     let mut cmd = Command::new("swift");
 
