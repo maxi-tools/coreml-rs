@@ -72,7 +72,7 @@ fn main() {
 
     // 3. Link to Swift library
     println!("cargo:rustc-link-lib=static=swift-library");
-    println!("cargo:rustc-link-search={}", lib_dir.to_str().unwrap());
+    println!("cargo:rustc-link-search={}", lib_dir.display());
 
     // Without this we will get warnings about not being able to find dynamic libraries, and then
     // we won't be able to compile since the Swift static libraries depend on them:
@@ -104,14 +104,16 @@ fn main() {
 }
 
 /// Copy `swift-library/{Package.swift,Sources}` into `OUT_DIR/swift-library`
-/// and return that path. Previous build products (`.build`, `generated`) in
-/// the staged copy are left alone so SwiftPM's incremental build still works;
-/// only the tracked sources are refreshed.
+/// and return that path. The staged `Sources` tree is replaced, not merged,
+/// so a file renamed or deleted upstream cannot linger and be compiled twice;
+/// SwiftPM's `.build` scratch tree is kept so its incremental build still
+/// applies, and `compile_swift` clears any previous archive from it.
 fn stage_swift_package() -> PathBuf {
     let src = manifest_dir().join("swift-library");
     let dst = out_dir().join("swift-library");
     fs::create_dir_all(&dst).unwrap();
     copy_file(&src.join("Package.swift"), &dst.join("Package.swift"));
+    let _ = fs::remove_dir_all(dst.join("Sources"));
     copy_tree(&src.join("Sources"), &dst.join("Sources"));
     dst
 }
@@ -196,22 +198,20 @@ fn compile_swift(package_dir: &Path) -> PathBuf {
     };
 
     let scratch = package_dir.join(".build");
+    // Whatever archive a previous run left in the scratch tree — possibly
+    // under a different layout, if the toolchain changed — must not be what
+    // `find_static_lib` picks up below.
+    remove_static_libs(&scratch);
     let mut cmd = Command::new("swift");
 
     cmd.current_dir(package_dir)
         .arg("build")
-        .args(["--scratch-path", scratch.to_str().unwrap()])
+        .arg("--scratch-path")
+        .arg(&scratch)
         .args(["--arch", arch])
         .args(["-Xswiftc", "-static"])
-        .args([
-            "-Xswiftc",
-            "-import-objc-header",
-            "-Xswiftc",
-            package_dir
-                .join("Sources/swift-library/bridging-header.h")
-                .to_str()
-                .unwrap(),
-        ]);
+        .args(["-Xswiftc", "-import-objc-header", "-Xswiftc"])
+        .arg(package_dir.join("Sources/swift-library/bridging-header.h"));
 
     if is_release_build() {
         cmd.args(["-c", "release"]);
@@ -250,23 +250,46 @@ fn compile_swift(package_dir: &Path) -> PathBuf {
     })
 }
 
-fn find_static_lib(dir: &Path) -> Option<PathBuf> {
-    let entries = fs::read_dir(dir).ok()?;
+const STATIC_LIB: &str = "libswift-library.a";
+
+/// Every `libswift-library.a` under `dir`, following directories but not
+/// symlinks (SwiftPM's `.build/<profile>` symlink would otherwise list the
+/// same archive twice).
+fn static_libs_under(dir: &Path, found: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
-        let file_type = entry.file_type().ok()?;
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
         if file_type.is_dir() {
-            if let Some(found) = find_static_lib(&path) {
-                return Some(found);
-            }
-        } else if path.file_name().and_then(|n| n.to_str()) == Some("libswift-library.a") {
-            // Prefer the real file over the profile symlink so the link
-            // search path is stable across SwiftPM layouts; either resolves
-            // to the same archive.
-            return path.parent().map(Path::to_path_buf);
+            static_libs_under(&path, found);
+        } else if file_type.is_file()
+            && path.file_name().and_then(|n| n.to_str()) == Some(STATIC_LIB)
+        {
+            found.push(path);
         }
     }
-    None
+}
+
+fn remove_static_libs(dir: &Path) {
+    let mut stale = Vec::new();
+    static_libs_under(dir, &mut stale);
+    for path in stale {
+        fs::remove_file(&path).unwrap_or_else(|e| panic!("remove stale {}: {e}", path.display()));
+    }
+}
+
+fn find_static_lib(dir: &Path) -> Option<PathBuf> {
+    let mut found = Vec::new();
+    static_libs_under(dir, &mut found);
+    // The archive's own directory, not the profile symlink, so the link
+    // search path is stable across SwiftPM layouts.
+    found
+        .first()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
 }
 
 fn manifest_dir() -> PathBuf {
