@@ -1,4 +1,8 @@
-use std::{path::PathBuf, process::Command};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 fn main() {
     println!("cargo:rerun-if-changed=src/swift.rs");
@@ -26,11 +30,29 @@ fn main() {
         return;
     }
 
+    // Everything this script produces lives under OUT_DIR. It used to write
+    // the generated bridge sources and the SwiftPM `.build` tree into the
+    // crate's own source directory, which for a git dependency is the shared
+    // `~/.cargo/git/checkouts/coreml-rs-*/<rev>/` tree. Two consequences bit
+    // us in 2026-09: a second cargo (another target dir on the same machine,
+    // or a fleet CI runner sharing CARGO_HOME) that re-validated that
+    // checkout wiped the untracked `.build` and `generated` directories
+    // between this script finishing and the final link, so rustc reported
+    // "could not find native static library `swift-library`" after a build
+    // log that said "Build complete!"; and debug and release builds of the
+    // same rev raced each other for the same `.build` directory. Staging a
+    // copy of the (tiny) package into OUT_DIR makes the build script pure in
+    // the way cargo expects: nothing outside OUT_DIR is written, and every
+    // profile/target-dir gets its own scratch tree.
+    let staged_package = stage_swift_package();
+
     // 1. Use `swift-bridge-build` to generate Swift/C FFI glue.
     //    You can also use the `swift-bridge` CLI.
     let bridge_files = vec!["src/swift.rs"];
-    swift_bridge_build::parse_bridges(bridge_files)
-        .write_all_concatenated(swift_bridge_out_dir(), "rust-calls-swift");
+    swift_bridge_build::parse_bridges(bridge_files).write_all_concatenated(
+        staged_package.join("Sources/swift-library/generated"),
+        "rust-calls-swift",
+    );
 
     // 2. Compile Swift library.
     //
@@ -39,21 +61,18 @@ fn main() {
     // check-only workflows and is required by the project guidelines; an
     // earlier revision of this branch dropped it, which turned a machine
     // without Xcode from "degrades gracefully" into "hard fails".
-    if Command::new("swift").arg("--version").output().is_ok() {
-        compile_swift();
+    let lib_dir = if Command::new("swift").arg("--version").output().is_ok() {
+        compile_swift(&staged_package)
     } else if std::env::var("COREML_RS_SKIP_SWIFT").as_deref() == Ok("1") {
         println!("cargo:warning=Swift compiler not found. Skipping Swift compilation (COREML_RS_SKIP_SWIFT=1).");
         return;
     } else {
         panic!("Swift compiler not found. Install Xcode or set COREML_RS_SKIP_SWIFT=1 for check-only builds.");
-    }
+    };
 
     // 3. Link to Swift library
     println!("cargo:rustc-link-lib=static=swift-library");
-    println!(
-        "cargo:rustc-link-search={}",
-        swift_library_static_lib_dir().to_str().unwrap()
-    );
+    println!("cargo:rustc-link-search={}", lib_dir.to_str().unwrap());
 
     // Without this we will get warnings about not being able to find dynamic libraries, and then
     // we won't be able to compile since the Swift static libraries depend on them:
@@ -84,9 +103,45 @@ fn main() {
     println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
 }
 
-fn compile_swift() {
-    let swift_package_dir = manifest_dir().join("swift-library");
+/// Copy `swift-library/{Package.swift,Sources}` into `OUT_DIR/swift-library`
+/// and return that path. Previous build products (`.build`, `generated`) in
+/// the staged copy are left alone so SwiftPM's incremental build still works;
+/// only the tracked sources are refreshed.
+fn stage_swift_package() -> PathBuf {
+    let src = manifest_dir().join("swift-library");
+    let dst = out_dir().join("swift-library");
+    fs::create_dir_all(&dst).unwrap();
+    copy_file(&src.join("Package.swift"), &dst.join("Package.swift"));
+    copy_tree(&src.join("Sources"), &dst.join("Sources"));
+    dst
+}
 
+fn copy_file(from: &Path, to: &Path) {
+    fs::copy(from, to)
+        .unwrap_or_else(|e| panic!("copy {} -> {}: {e}", from.display(), to.display()));
+}
+
+fn copy_tree(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap_or_else(|e| panic!("read {}: {e}", from.display())) {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            // `generated` is a build product, never a source; skip a stale one
+            // left by the pre-OUT_DIR layout.
+            if entry.file_name() == "generated" {
+                continue;
+            }
+            copy_tree(&entry.path(), &target);
+        } else {
+            copy_file(&entry.path(), &target);
+        }
+    }
+}
+
+/// Run `swift build` on the staged package and return the directory that
+/// holds `libswift-library.a`.
+fn compile_swift(package_dir: &Path) -> PathBuf {
     let triple = std::env::var("TARGET").unwrap();
     // Rust spells Apple silicon `aarch64`; Xcode spells it `arm64`. The old
     // SwiftPM native build system accepted either, but the Swift Build
@@ -101,18 +156,20 @@ fn compile_swift() {
         other => other,
     };
 
+    let scratch = package_dir.join(".build");
     let mut cmd = Command::new("swift");
 
-    cmd.current_dir(swift_package_dir)
+    cmd.current_dir(package_dir)
         .arg("build")
+        .args(["--scratch-path", scratch.to_str().unwrap()])
         .args(["--arch", arch])
         .args(["-Xswiftc", "-static"])
         .args([
             "-Xswiftc",
             "-import-objc-header",
             "-Xswiftc",
-            swift_source_dir()
-                .join("bridging-header.h")
+            package_dir
+                .join("Sources/swift-library/bridging-header.h")
                 .to_str()
                 .unwrap(),
         ]);
@@ -138,35 +195,49 @@ fn compile_swift() {
         );
         std::process::exit(1);
     }
+
+    // SwiftPM's native build system leaves the product at
+    // `.build/<profile>/libswift-library.a` (a symlink into
+    // `.build/<triple>/<profile>/`); Xcode 27's Swift Build system puts it
+    // under `.build/out/Products/<Profile>/`. Rather than hard-code either,
+    // find the archive and link-search wherever it landed. A build that
+    // "completed" without producing it is the Xcode 27 ARCHS failure above
+    // (or a sibling of it), so name the scratch tree in the panic.
+    find_static_lib(&scratch).unwrap_or_else(|| {
+        panic!(
+            "swift build reported success but produced no libswift-library.a under {}",
+            scratch.display()
+        )
+    })
 }
 
-fn swift_bridge_out_dir() -> PathBuf {
-    generated_code_dir()
+fn find_static_lib(dir: &Path) -> Option<PathBuf> {
+    let entries = fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file_type = entry.file_type().ok()?;
+        if file_type.is_dir() {
+            if let Some(found) = find_static_lib(&path) {
+                return Some(found);
+            }
+        } else if path.file_name().and_then(|n| n.to_str()) == Some("libswift-library.a") {
+            // Prefer the real file over the profile symlink so the link
+            // search path is stable across SwiftPM layouts; either resolves
+            // to the same archive.
+            return path.parent().map(Path::to_path_buf);
+        }
+    }
+    None
 }
 
 fn manifest_dir() -> PathBuf {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    PathBuf::from(manifest_dir)
+    PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
+}
+
+fn out_dir() -> PathBuf {
+    PathBuf::from(std::env::var("OUT_DIR").unwrap())
 }
 
 fn is_release_build() -> bool {
     std::env::var("PROFILE").unwrap() == "release"
-}
-
-fn swift_source_dir() -> PathBuf {
-    manifest_dir().join("swift-library/Sources/swift-library")
-}
-
-fn generated_code_dir() -> PathBuf {
-    swift_source_dir().join("generated")
-}
-
-fn swift_library_static_lib_dir() -> PathBuf {
-    let debug_or_release = if is_release_build() {
-        "release"
-    } else {
-        "debug"
-    };
-
-    manifest_dir().join(format!("swift-library/.build/{}", debug_or_release))
 }
