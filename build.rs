@@ -271,12 +271,20 @@ fn compile_swift(package_dir: &Path) -> PathBuf {
     }
 
     // Pick the directory SwiftPM actually wrote `libswift-library.a` into for
-    // this configuration. Try the PROFILE-keyed arch-specific product
-    // directory first; that's where the native build system writes it and
-    // where Xcode 27 Swift Build writes it (`<scratch>/out/Products/<Profile>`
-    // is also keyed off PROFILE — both are intentionally NOT the
-    // `.build/<profile>` convenience symlink).
-    let native = scratch.join(arch).join(profile_dir);
+    // this configuration. The native build system writes it at
+    // `<scratch>/<swiftpm-triple>/<profile>/`; SwiftPM's triple is the full
+    // one (`arm64-apple-macosx`, not the Rust triple `aarch64-apple-darwin`,
+    // and not the bare arch `arm64`), which is what `swift build --arch`
+    // produces after the aarch64->arm64 mapping above. The Xcode 27 Swift
+    // Build system writes the same archive at
+    // `<scratch>/out/Products/<Profile>/`. Both are keyed off PROFILE so a
+    // debug and release build of the same rev cannot share a link search
+    // path, and the `.build/<profile>` convenience symlink is intentionally
+    // NOT used: it does not exist under Xcode 27 Swift Build, and following
+    // it would mask a "swift build reported success but produced no
+    // library" failure (the same swallowed-success shape that hit coreml-rs
+    // at rev 98768f3 on maxi-ml-mac-app run 35494379532).
+    let native = scratch.join(swiftpm_triple(arch)).join(profile_dir);
     let swift_build = scratch.join("out").join("Products").join(profile_pascal);
     locate_static_lib(&scratch, &[&native, &swift_build]).unwrap_or_else(|| {
         panic!(
@@ -287,6 +295,16 @@ fn compile_swift(package_dir: &Path) -> PathBuf {
             swift_build.display(),
         )
     })
+}
+
+/// Build the SwiftPM triple SwiftPM uses for `--arch <arch>` output paths
+/// from the bare arch. SwiftPM does not key its `.build/<triple>/<profile>/`
+/// layout off either the bare arch (`arm64`) or the Rust triple
+/// (`aarch64-apple-darwin`); it uses the full SwiftPM triple
+/// (`arm64-apple-macosx`, `x86_64-apple-macosx`). Mapping only the arch is
+/// not enough.
+fn swiftpm_triple(arch: &str) -> String {
+    format!("{arch}-apple-macosx")
 }
 
 const STATIC_LIB: &str = "libswift-library.a";
@@ -326,9 +344,9 @@ fn remove_static_libs(dir: &Path) {
 /// cargo will use). Candidates are tried in order; the first one that
 /// contains the archive wins. Only as a last resort do we walk the whole
 /// scratch tree — that's the "swallowed swift build failure" path the
-/// recursive search was originally added to catch, and it now logs the
-/// exact candidates it tried so a future regression names the layout it
-/// landed in instead of silently linking the wrong archive.
+/// recursive search was originally added to catch, and a hit on it now
+/// warns loudly so the next reader sees which SwiftPM layout landed
+/// instead of silently linking whatever the walk happened to find.
 fn locate_static_lib(scratch: &Path, candidates: &[&Path]) -> Option<PathBuf> {
     for dir in candidates {
         let archive = dir.join(STATIC_LIB);
@@ -339,6 +357,16 @@ fn locate_static_lib(scratch: &Path, candidates: &[&Path]) -> Option<PathBuf> {
     let mut found = Vec::new();
     static_libs_under(scratch, &mut found);
     if let Some(path) = found.into_iter().next() {
+        println!(
+            "cargo:warning=swift build succeeded but archive was not at the expected path; \
+             falling back to {} (no candidate paths matched: {})",
+            path.display(),
+            candidates
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         return path.parent().map(Path::to_path_buf);
     }
     None
