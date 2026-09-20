@@ -182,6 +182,24 @@ fn export_cdecl_entry_points(generated_dir: &Path) {
 
 /// Run `swift build` on the staged package and return the directory that
 /// holds `libswift-library.a`.
+///
+/// The scratch tree lives directly under OUT_DIR (`OUT_DIR/swift-build`), not
+/// inside the staged package — that way it is the build script's exclusive
+/// scratch space regardless of how the staged package is laid out, and there
+/// is no path confusion between the source-tree `.build` convenience symlinks
+/// and the real product directory.
+///
+/// The link search path is the arch-specific product directory SwiftPM wrote
+/// for the requested configuration, computed from the target arch (first
+/// component of `TARGET`) and `PROFILE`. The native build system creates
+/// `<scratch>/<arch>/<profile>/`; Xcode 27's Swift Build system creates
+/// `<scratch>/out/Products/<Profile>/`. Both are keyed off `PROFILE` so a
+/// debug and release build of the same rev cannot share a link search path.
+/// The `.build/<profile>` convenience symlink is intentionally NOT used: it
+/// does not exist under Xcode 27 Swift Build, and following it would mask a
+/// "swift build reported success but produced no library" failure (the same
+/// swallowed-success shape that hit coreml-rs at rev 98768f3 on
+/// maxi-ml-mac-app run 35494379532).
 fn compile_swift(package_dir: &Path) -> PathBuf {
     let triple = std::env::var("TARGET").unwrap();
     // Rust spells Apple silicon `aarch64`; Xcode spells it `arm64`. The old
@@ -197,11 +215,29 @@ fn compile_swift(package_dir: &Path) -> PathBuf {
         other => other,
     };
 
-    let scratch = package_dir.join(".build");
+    // Scratch lives directly under OUT_DIR, sibling to the staged package.
+    // It used to be `<staged>/.build`, which (a) conflated the staged source
+    // tree with the build output and (b) on the Xcode 27 Swift Build system
+    // made the archive end up at `.build/out/Products/<Profile>/` while the
+    // build script looked under `.build/<profile>/`. Sibling scratch removes
+    // both confusions.
+    let scratch = out_dir().join("swift-build");
+    let profile_dir = if is_release_build() {
+        "release"
+    } else {
+        "debug"
+    };
+    let profile_pascal = if is_release_build() {
+        "Release"
+    } else {
+        "Debug"
+    };
+
     // Whatever archive a previous run left in the scratch tree — possibly
     // under a different layout, if the toolchain changed — must not be what
-    // `find_static_lib` picks up below.
+    // `locate_static_lib` picks up below.
     remove_static_libs(&scratch);
+
     let mut cmd = Command::new("swift");
 
     cmd.current_dir(package_dir)
@@ -217,35 +253,38 @@ fn compile_swift(package_dir: &Path) -> PathBuf {
         cmd.args(["-c", "release"]);
     }
 
-    let child = cmd.spawn().unwrap_or_else(|e| {
+    // Inherit stdio so the Swift compiler's progress and any error messages
+    // reach the cargo build log directly. Capturing stdout/stderr into a
+    // buffer (as the previous revision did with `wait_with_output`) hides
+    // the failure that this whole script exists to surface.
+    let status = cmd.status().unwrap_or_else(|e| {
         eprintln!("Failed to spawn swift build command: {}", e);
         std::process::exit(1);
     });
-    let exit_status = child.wait_with_output().unwrap_or_else(|e| {
-        eprintln!("Failed to wait for swift build: {}", e);
-        std::process::exit(1);
-    });
 
-    if !exit_status.status.success() {
+    if !status.success() {
         eprintln!(
-            "Swift build failed:\nStderr: {}\nStdout: {}",
-            String::from_utf8_lossy(&exit_status.stderr),
-            String::from_utf8_lossy(&exit_status.stdout),
+            "swift build exited with status {}; see the compiler output above",
+            status
         );
         std::process::exit(1);
     }
 
-    // SwiftPM's native build system leaves the product at
-    // `.build/<profile>/libswift-library.a` (a symlink into
-    // `.build/<triple>/<profile>/`); Xcode 27's Swift Build system puts it
-    // under `.build/out/Products/<Profile>/`. Rather than hard-code either,
-    // find the archive and link-search wherever it landed. A build that
-    // "completed" without producing it is the Xcode 27 ARCHS failure above
-    // (or a sibling of it), so name the scratch tree in the panic.
-    find_static_lib(&scratch).unwrap_or_else(|| {
+    // Pick the directory SwiftPM actually wrote `libswift-library.a` into for
+    // this configuration. Try the PROFILE-keyed arch-specific product
+    // directory first; that's where the native build system writes it and
+    // where Xcode 27 Swift Build writes it (`<scratch>/out/Products/<Profile>`
+    // is also keyed off PROFILE — both are intentionally NOT the
+    // `.build/<profile>` convenience symlink).
+    let native = scratch.join(arch).join(profile_dir);
+    let swift_build = scratch.join("out").join("Products").join(profile_pascal);
+    locate_static_lib(&scratch, &[&native, &swift_build]).unwrap_or_else(|| {
         panic!(
-            "swift build reported success but produced no libswift-library.a under {}",
-            scratch.display()
+            "swift build reported success but produced no libswift-library.a under {} \
+             (tried {} and {})",
+            scratch.display(),
+            native.display(),
+            swift_build.display(),
         )
     })
 }
@@ -282,14 +321,27 @@ fn remove_static_libs(dir: &Path) {
     }
 }
 
-fn find_static_lib(dir: &Path) -> Option<PathBuf> {
+/// Pick the directory that holds `libswift-library.a` for the requested
+/// configuration, returning the parent of the archive (the link search path
+/// cargo will use). Candidates are tried in order; the first one that
+/// contains the archive wins. Only as a last resort do we walk the whole
+/// scratch tree — that's the "swallowed swift build failure" path the
+/// recursive search was originally added to catch, and it now logs the
+/// exact candidates it tried so a future regression names the layout it
+/// landed in instead of silently linking the wrong archive.
+fn locate_static_lib(scratch: &Path, candidates: &[&Path]) -> Option<PathBuf> {
+    for dir in candidates {
+        let archive = dir.join(STATIC_LIB);
+        if archive.is_file() {
+            return Some(dir.to_path_buf());
+        }
+    }
     let mut found = Vec::new();
-    static_libs_under(dir, &mut found);
-    // The archive's own directory, not the profile symlink, so the link
-    // search path is stable across SwiftPM layouts.
-    found
-        .first()
-        .and_then(|p| p.parent().map(Path::to_path_buf))
+    static_libs_under(scratch, &mut found);
+    if let Some(path) = found.into_iter().next() {
+        return path.parent().map(Path::to_path_buf);
+    }
+    None
 }
 
 fn manifest_dir() -> PathBuf {
