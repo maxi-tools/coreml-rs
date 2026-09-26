@@ -56,6 +56,7 @@ fn main() {
 }
 
 fn compile_swift() {
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_DIAGNOSTICS");
     let swift_package_dir = manifest_dir().join("swift-library");
 
     let triple = std::env::var("TARGET").unwrap();
@@ -77,6 +78,10 @@ fn compile_swift() {
                 .to_str()
                 .unwrap(),
         ]);
+
+    if std::env::var_os("CARGO_FEATURE_DIAGNOSTICS").is_some() {
+        cmd.args(["-Xswiftc", "-D", "-Xswiftc", "COREML_RS_DIAGNOSTICS"]);
+    }
 
     if is_release_build() {
         cmd.args(["-c", "release"]);

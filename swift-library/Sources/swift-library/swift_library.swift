@@ -345,6 +345,7 @@ class ModelOutput {
 	/// Tensors whose non-contiguous layout has already been reported, so the
 	/// (env-gated) diagnostic prints once per tensor instead of per predict.
 	/// Concurrency safety: every access is guarded by `stridedLoggedLock`.
+	#if COREML_RS_DIAGNOSTICS
 	nonisolated(unsafe) private static var stridedLogged = Set<String>()
 	private static let stridedLoggedLock = NSLock()
 	private static let strideTraceEnabled: Bool = {
@@ -369,6 +370,8 @@ class ModelOutput {
 			"[coreml-rs] non-contiguous output \(tag) \(name): shape=\(layout.shape) strides=\(layout.strides) expected=\(layout.expectedStrides) count=\(count) — compacting per predict"
 		)
 	}
+
+	#endif
 
 	/// Number of trailing elements that are already densely packed, i.e. the
 	/// largest suffix of dims whose strides match a dense packing. Compaction
@@ -450,9 +453,11 @@ class ModelOutput {
 
 		let l = out.count
 		let layout = contiguousLayout(for: out)
+		#if COREML_RS_DIAGNOSTICS
 		if !layout.isContiguous {
 			noteStrided("outputF32", name.toString(), layout, count: l)
 		}
+		#endif
 
 		if layout.isContiguous && out.dataType == .float32 {
 			let ptr = out.dataPointer.assumingMemoryBound(to: Float32.self)
@@ -484,9 +489,11 @@ class ModelOutput {
 
 		let l = out.count
 		let layout = contiguousLayout(for: out)
+		#if COREML_RS_DIAGNOSTICS
 		if !layout.isContiguous {
 			noteStrided("outputI32", name.toString(), layout, count: l)
 		}
+		#endif
 
 		if layout.isContiguous && out.dataType == .int32 {
 			let ptr = out.dataPointer.assumingMemoryBound(to: Int32.self)
@@ -512,9 +519,11 @@ class ModelOutput {
 
 		let l = out.count
 		let layout = contiguousLayout(for: out)
+		#if COREML_RS_DIAGNOSTICS
 		if !layout.isContiguous {
 			noteStrided("outputU16", name.toString(), layout, count: l)
 		}
+		#endif
 
 		if layout.isContiguous && out.dataType == .float16 {
 			let ptr = out.dataPointer.assumingMemoryBound(to: UInt16.self)

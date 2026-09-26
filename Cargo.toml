@@ -23,6 +23,11 @@ description = "CoreML bindings for Rust using swift-bridge to maximize performan
 readme = "README.md"
 license-file = "LICENSE"
 
+[features]
+default = []
+# Compile optional Swift stride diagnostics; runtime env switch still applies.
+diagnostics = []
+
 [lib]
 name = "coreml_rs_fork"
 path = "src/lib.rs"
