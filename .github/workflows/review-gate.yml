@@ -116,7 +116,7 @@ permissions: {}
 
 jobs:
   review-gate:
-    uses: maxi-tools/ci/.github/workflows/review-gate-reusable.yml@4f055cedbff6a1ed830f40d1fd2216e385a51395  # maxi-tools/ci main
+    uses: maxi-tools/ci/.github/workflows/review-gate-reusable.yml@74b40fa8bb81fb402cf393df8afabedee6f38d92  # maxi-tools/ci main
     # `pull-requests: write` is granted here because the `dedupe` job (added
     # in maxi-tools/ci#9) needs it: it posts a duplicate-of reply and resolves
     # the thread for review-bot comments that land on the same lines in the
