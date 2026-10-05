@@ -77,8 +77,13 @@ impl RetryBackoff {
     }
 }
 
-/// Configures `predict_with_retry` / `predict_with_retry_if` on
-/// [`CoreMLModel`] and [`CoreMLModelWithState`].
+/// Configures the retry methods on [`CoreMLModel`] and
+/// [`CoreMLModelWithState`]: `predict_with_retry{,_if}` and
+/// `predict_with_rebind_retry{,_if}`.
+///
+/// For a model that takes inputs, use the `rebind` variants -- a failed
+/// predict clears the input bindings, so a retry that does not re-bind
+/// cannot succeed.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PredictRetryOptions {
     pub max_retries: usize,

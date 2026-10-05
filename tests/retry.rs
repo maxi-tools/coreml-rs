@@ -36,39 +36,50 @@ fn retry_vitae_under_concurrent_load() {
     let require_baseline_failure = std::env::var_os("COREML_RETRY_STRESS_REQUIRE_BASELINE_FAILURE")
         .is_some_and(|value| value != "0");
 
-    let baseline = stress_predict(
-        &model_paths,
+    // Everything except which pass this is is identical between the two,
+    // so it is built once and shared.
+    let config = StressConfig {
+        model_paths,
         workers,
         total_iterations,
         progress_every,
-        "baseline",
         compute_platform,
         disable_experimental_mle,
-        None,
+    };
+
+    let baseline = stress_predict(
+        &config,
+        &StressRun {
+            label: "baseline",
+            // The baseline must not retry, or there is nothing to compare
+            // the retry pass against.
+            retry_options: None,
+        },
     );
     let retry = run_retry.then(|| {
         stress_predict(
-            &model_paths,
-            workers,
-            total_iterations,
-            progress_every,
-            "retry",
-            compute_platform,
-            disable_experimental_mle,
-            Some(PredictRetryOptions::fixed(
-                max_retries,
-                Duration::from_millis(10),
-            )),
+            &config,
+            &StressRun {
+                label: "retry",
+                retry_options: Some(PredictRetryOptions::fixed(
+                    max_retries,
+                    Duration::from_millis(10),
+                )),
+            },
         )
     });
 
+    // Names, not just a count: when a run fails you want to know which
+    // model. Borrowed from the config, which owns the paths.
+    let model_names = config
+        .model_paths
+        .iter()
+        .map(|path| path.file_name().unwrap().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(",");
+
     eprintln!(
-        "coreml stress: models={}, workers={workers}, total_iterations={total_iterations}, compute={}, disable_experimental_mle={disable_experimental_mle}, baseline_failures={}, retry_failures={}, retries_attempted={}",
-        model_paths
-            .iter()
-            .map(|path| path.file_name().unwrap().to_string_lossy())
-            .collect::<Vec<_>>()
-            .join(","),
+        "coreml stress: models={model_names}, workers={workers}, total_iterations={total_iterations}, compute={}, disable_experimental_mle={disable_experimental_mle}, baseline_failures={}, retry_failures={}, retries_attempted={}",
         compute_platform_name(compute_platform),
         baseline.failures,
         retry
@@ -144,16 +155,36 @@ struct StressResult {
     timings: StressTimings,
 }
 
-fn stress_predict(
-    model_paths: &[PathBuf],
+/// What to run: the same for every stress pass, differing only in
+/// [`StressRun::label`] and [`StressRun::retry_options`].
+struct StressConfig {
+    model_paths: Vec<PathBuf>,
     workers: usize,
     total_iterations: usize,
     progress_every: usize,
-    label: &'static str,
     compute_platform: ComputePlatform,
     disable_experimental_mle: bool,
+}
+
+/// One stress pass.
+struct StressRun {
+    /// Distinguishes this pass in the log line.
+    label: &'static str,
+    /// `None` for the baseline pass -- which must not retry, so that the
+    /// retry pass has something to be compared against. `Some(..)` enables
+    /// the policy for the retry pass.
     retry_options: Option<PredictRetryOptions>,
-) -> StressResult {
+}
+
+fn stress_predict(config: &StressConfig, run: &StressRun) -> StressResult {
+    let model_paths = config.model_paths.as_slice();
+    let workers = config.workers;
+    let total_iterations = config.total_iterations;
+    let progress_every = config.progress_every;
+    let compute_platform = config.compute_platform;
+    let disable_experimental_mle = config.disable_experimental_mle;
+    let label = run.label;
+    let retry_options = run.retry_options;
     let start = Instant::now();
     let completed = Arc::new(AtomicUsize::new(0));
     let predictions = Arc::new(AtomicUsize::new(0));
