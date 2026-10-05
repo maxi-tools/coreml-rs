@@ -21,7 +21,7 @@ use std::{
 /// Mirrors `RetryBackoff` in upstream `swarnimarun/coreml-rs` (commit
 /// `82f6fa3` — feat: add support for local retry) so existing upstream
 /// callers can port without renaming.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RetryBackoff {
     /// No delay between attempts.
     None,
@@ -61,7 +61,7 @@ impl RetryBackoff {
 
 /// Configures `predict_with_retry` / `predict_with_retry_if` on
 /// [`CoreMLModel`] and [`CoreMLModelWithState`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PredictRetryOptions {
     pub max_retries: usize,
     pub backoff: RetryBackoff,
