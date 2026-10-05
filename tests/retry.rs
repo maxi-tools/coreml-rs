@@ -313,7 +313,6 @@ fn stress_predict(config: &StressConfig, run: &StressRun) -> StressResult {
                     let bind_start = Instant::now();
                     let model = stress_model.model.get();
                     let input_name = stress_model.input_name.clone();
-                    let retry_counters = Arc::clone(&retries);
                     let result =
                         bind_and_predict(model, &input_name, &input, retry_options, &retries);
                     timings
