@@ -10,7 +10,7 @@ fn main() -> Result<()> {
 
     let mut options = CoreMLModelOptions::default();
     options.compute_platform = args.compute_platform;
-    options.disable_experimental_mle = args.disable_experimental_mle;
+    options.disable_experimental_mle = Some(args.disable_experimental_mle);
 
     let mut model = CoreMLModelWithState::new(&args.model_path, options)
         .load()
@@ -21,12 +21,14 @@ fn main() -> Result<()> {
         .description()
         .map_err(|err| anyhow::anyhow!("{err}"))?;
     println!("Inputs:");
-    for input in description.get("input").into_iter().flatten() {
-        println!("  {input}");
+    for name in description.input_names() {
+        let feature = &description.inputs[&name];
+        println!("  {} {} {:?}", name, feature.shape, feature.type_name);
     }
     println!("Outputs:");
-    for output in description.get("output").into_iter().flatten() {
-        println!("  {output}");
+    for name in description.output_names() {
+        let feature = &description.outputs[&name];
+        println!("  {} {} {:?}", name, feature.shape, feature.type_name);
     }
 
     let input_shapes = model
@@ -55,7 +57,9 @@ fn main() -> Result<()> {
         .with_context(|| format!("failed to create {}", args.output_dir.display()))?;
 
     for (name, array) in output.outputs {
-        let values: ArrayD<f32> = array.extract_to_tensor();
+        let values: ArrayD<f32> = array
+            .extract_to_tensor()
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
         let stats = stats(values.iter().copied())?;
         println!(
             "{name}: shape={:?}, len={}, finite={}, min={:.6}, max={:.6}, mean={:.6}, l2_norm={:.6}",

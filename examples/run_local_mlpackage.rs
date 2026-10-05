@@ -22,12 +22,14 @@ fn main() -> Result<()> {
         .description()
         .map_err(|err| anyhow::anyhow!("{err}"))?;
     println!("Inputs:");
-    for input in description.get("input").into_iter().flatten() {
-        println!("  {input}");
+    for name in description.input_names() {
+        let feature = &description.inputs[&name];
+        println!("  {} {} {:?}", name, feature.shape, feature.type_name);
     }
     println!("Outputs:");
-    for output in description.get("output").into_iter().flatten() {
-        println!("  {output}");
+    for name in description.output_names() {
+        let feature = &description.outputs[&name];
+        println!("  {} {} {:?}", name, feature.shape, feature.type_name);
     }
 
     let input_shapes = model
@@ -80,7 +82,9 @@ fn main() -> Result<()> {
         println!("Prediction outputs for {label}:");
         let mut prediction_outputs = Vec::new();
         for (name, array) in output.outputs {
-            let values: ArrayD<f32> = array.extract_to_tensor();
+            let values: ArrayD<f32> = array
+                .extract_to_tensor()
+                .map_err(|err| anyhow::anyhow!("{err}"))?;
             let stats = stats(values.iter().copied())?;
             println!(
                 "  {name}: shape={:?}, len={}, finite={}, min={:.6}, max={:.6}, mean={:.6}, l2_norm={:.6}",

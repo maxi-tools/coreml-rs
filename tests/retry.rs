@@ -231,7 +231,7 @@ fn load_stress_models(
         .map(|model_path| {
             let mut options = CoreMLModelOptions::default();
             options.compute_platform = compute_platform;
-            options.disable_experimental_mle = disable_experimental_mle;
+            options.disable_experimental_mle = Some(disable_experimental_mle);
 
             let load_start = Instant::now();
             let model = CoreMLModelWithState::new(model_path, options)
@@ -304,6 +304,7 @@ fn compute_platform_name(compute_platform: ComputePlatform) -> &'static str {
         ComputePlatform::Cpu => "cpu",
         ComputePlatform::CpuAndANE => "cpu-and-ane",
         ComputePlatform::CpuAndGpu => "cpu-and-gpu",
+        ComputePlatform::All => "all",
     }
 }
 
