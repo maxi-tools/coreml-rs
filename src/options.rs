@@ -9,6 +9,9 @@ pub struct CoreMLModelOptions {
     pub allow_low_precision_accumulation_on_gpu: Option<bool>,
     /// Maps to MLPredictionOptions.usesCPUOnly when set.
     pub prediction_uses_cpu_only: Option<bool>,
+    /// Maps to MLModelConfiguration.experimentalMLE5EngineUsage when set.
+    /// When `Some(true)`, disables the experimental MLE engine for this load.
+    pub disable_experimental_mle: Option<bool>,
 }
 
 impl Default for CoreMLModelOptions {
@@ -18,6 +21,7 @@ impl Default for CoreMLModelOptions {
             cache_dir: PathBuf::new(),
             allow_low_precision_accumulation_on_gpu: None,
             prediction_uses_cpu_only: None,
+            disable_experimental_mle: None,
         }
     }
 }
@@ -44,6 +48,11 @@ impl CoreMLModelOptions {
 
     pub fn with_prediction_uses_cpu_only(mut self, enabled: bool) -> Self {
         self.prediction_uses_cpu_only = Some(enabled);
+        self
+    }
+
+    pub fn with_disable_experimental_mle(mut self, disabled: bool) -> Self {
+        self.disable_experimental_mle = Some(disabled);
         self
     }
 }

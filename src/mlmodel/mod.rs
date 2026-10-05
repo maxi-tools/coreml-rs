@@ -13,7 +13,97 @@ use std::{
     collections::HashMap,
     io::{Read, Write},
     path::{Path, PathBuf},
+    time::Duration,
 };
+
+/// Backoff schedule applied between retry attempts.
+///
+/// Mirrors `RetryBackoff` in upstream `swarnimarun/coreml-rs` (commit
+/// `82f6fa3` — feat: add support for local retry) so existing upstream
+/// callers can port without renaming.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryBackoff {
+    /// No delay between attempts.
+    None,
+    /// Constant delay between attempts.
+    Fixed(Duration),
+    /// Exponential growth, capped at `max`.
+    Exponential {
+        initial: Duration,
+        multiplier: f64,
+        max: Duration,
+    },
+}
+
+impl Default for RetryBackoff {
+    fn default() -> Self {
+        RetryBackoff::None
+    }
+}
+
+impl RetryBackoff {
+    fn delay(self, retry_index: usize) -> Duration {
+        match self {
+            RetryBackoff::None => Duration::ZERO,
+            RetryBackoff::Fixed(delay) => delay,
+            RetryBackoff::Exponential {
+                initial,
+                multiplier,
+                max,
+            } => {
+                let multiplier = multiplier.max(1.0);
+                let delay = initial.mul_f64(multiplier.powi(retry_index as i32));
+                delay.min(max)
+            }
+        }
+    }
+}
+
+/// Configures `predict_with_retry` / `predict_with_retry_if` on
+/// [`CoreMLModel`] and [`CoreMLModelWithState`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PredictRetryOptions {
+    pub max_retries: usize,
+    pub backoff: RetryBackoff,
+}
+
+impl Default for PredictRetryOptions {
+    fn default() -> Self {
+        Self::none()
+    }
+}
+
+impl PredictRetryOptions {
+    pub const fn none() -> Self {
+        Self {
+            max_retries: 0,
+            backoff: RetryBackoff::None,
+        }
+    }
+
+    pub const fn fixed(max_retries: usize, delay: Duration) -> Self {
+        Self {
+            max_retries,
+            backoff: RetryBackoff::Fixed(delay),
+        }
+    }
+
+    pub const fn exponential(
+        max_retries: usize,
+        initial: Duration,
+        multiplier: f64,
+        max: Duration,
+    ) -> Self {
+        Self {
+            max_retries,
+            backoff: RetryBackoff::Exponential {
+                initial,
+                multiplier,
+                max,
+            },
+        }
+    }
+}
 
 pub use crate::swift::MLModelOutput;
 
@@ -351,6 +441,18 @@ impl CoreMLModelWithState {
         }
     }
 
+    /// Returns the shape of every input feature, or `Err(ModelNotLoaded)`
+    /// when the model has not been loaded yet.
+    pub fn input_shapes(&self) -> Result<HashMap<String, Vec<usize>>, CoreMLError> {
+        Ok(self.description()?.input_shapes())
+    }
+
+    /// Returns the shape of every output feature, or `Err(ModelNotLoaded)`
+    /// when the model has not been loaded yet.
+    pub fn output_shapes(&self) -> Result<HashMap<String, Vec<usize>>, CoreMLError> {
+        Ok(self.description()?.output_shapes())
+    }
+
     pub fn add_input(
         &mut self,
         tag: impl AsRef<str>,
@@ -520,6 +622,31 @@ impl CoreMLModelWithState {
         }
     }
 
+    /// Predict with a retry policy. Re-runs `predict()` up to
+    /// `options.max_retries` additional times on failure, sleeping between
+    /// attempts according to `options.backoff`.
+    pub fn predict_with_retry(
+        &mut self,
+        options: PredictRetryOptions,
+    ) -> Result<MLModelOutput, CoreMLError> {
+        self.predict_with_retry_if(options, |_| true)
+    }
+
+    /// Like [`predict_with_retry`](Self::predict_with_retry), but only
+    /// retries when `should_retry` returns `true` for the failure.
+    pub fn predict_with_retry_if(
+        &mut self,
+        options: PredictRetryOptions,
+        should_retry: impl FnMut(&CoreMLError) -> bool,
+    ) -> Result<MLModelOutput, CoreMLError> {
+        match self {
+            CoreMLModelWithState::Unloaded(_, _) => Err(CoreMLError::ModelNotLoaded),
+            CoreMLModelWithState::Loaded(core_mlmodel, _, _) => {
+                core_mlmodel.predict_with_retry_if(options, should_retry)
+            }
+        }
+    }
+
     pub fn make_state(&mut self) -> Result<(), CoreMLError> {
         match self {
             CoreMLModelWithState::Unloaded(_, _) => Err(CoreMLError::ModelNotLoaded),
@@ -625,6 +752,9 @@ impl CoreMLModel {
         }
         if let Some(enabled) = opts.prediction_uses_cpu_only {
             model.setPredictionUsesCPUOnly(enabled);
+        }
+        if let Some(disabled) = opts.disable_experimental_mle {
+            model.setDisableExperimentalMLE(disabled);
         }
         model
     }
@@ -1172,6 +1302,36 @@ impl CoreMLModel {
 
     pub fn predict_with_state(&mut self) -> Result<MLModelOutput, CoreMLError> {
         self.predict_inner(true, |model: &Model| model.predictWithState())
+    }
+
+    /// Run `predict` under a retry policy. Each retry re-runs the full
+    /// inner predict path (including output buffer rebinding), so
+    /// transient CoreML/ANE errors are cleared before the next attempt.
+    pub fn predict_with_retry(
+        &mut self,
+        options: PredictRetryOptions,
+    ) -> Result<MLModelOutput, CoreMLError> {
+        self.predict_with_retry_if(options, |_| true)
+    }
+
+    pub fn predict_with_retry_if(
+        &mut self,
+        options: PredictRetryOptions,
+        mut should_retry: impl FnMut(&CoreMLError) -> bool,
+    ) -> Result<MLModelOutput, CoreMLError> {
+        for attempt in 0..=options.max_retries {
+            match self.predict() {
+                Ok(out) => return Ok(out),
+                Err(err) if attempt < options.max_retries && should_retry(&err) => {
+                    let delay = options.backoff.delay(attempt);
+                    if !delay.is_zero() {
+                        std::thread::sleep(delay);
+                    }
+                }
+                Err(err) => return Err(err),
+            }
+        }
+        unreachable!("retry loop always returns from success or final failure")
     }
 
     pub fn description(&self) -> crate::description::ModelDescription {

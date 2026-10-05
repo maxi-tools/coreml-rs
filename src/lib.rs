@@ -25,6 +25,7 @@ pub use ffi::ComputePlatform;
 pub use mlarray::MLDataType;
 pub use mlmodel::{
     compute_plan_device_counts, ComputePlanDeviceCounts, CoreMLModel, CoreMLModelWithState,
+    PredictRetryOptions, RetryBackoff,
 };
 pub use options::{CoreMLModelInfo, CoreMLModelOptions};
 pub use swift::ffi;

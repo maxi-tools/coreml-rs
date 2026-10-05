@@ -82,6 +82,10 @@ pub mod ffi {
     extern "Swift" {
         type Model;
 
+        #[swift_bridge(swift_name = "setDisableExperimentalMLE")]
+        fn setDisableExperimentalMLE(&mut self, disabled: bool);
+
+        #[must_use()]
         fn bindOutputF32(
             &self,
             shape: Vec<i32>,
