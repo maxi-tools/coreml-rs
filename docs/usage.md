@@ -5,7 +5,7 @@
 - **[`CoreMLModelWithState`]** — State machine for single-inference models. Two states: `Unloaded` (holds model bytes/path, no GPU memory) and `Loaded` (model in memory, ready for inference).
 - **[`CoreMLBatchModelWithState`]** — State machine for batch inference models. Accumulates multiple inputs and runs a single batch prediction.
 - **[`MLArray`]** — Multi-dtype array wrapper around `ndarray::ArrayD`. Supports f32, f16, i32, i16, i8, u32, u16, u8. F32 and f16 are the most mature.
-- **[`ComputePlatform`]** — Selects which Apple hardware to use: `Cpu`, `CpuAndGpu` (default), or `CpuAndANE`.
+- **[`ComputePlatform`]** — Selects which Apple hardware to use: `Cpu`, `CpuAndGpu`, `CpuAndANE` (default), or `All`.
 
 ## Model Loading
 
@@ -59,7 +59,7 @@ options.compute_platform = ComputePlatform::CpuAndANE;
 On macOS 15+, set this to avoid crashes with the MLE5 engine:
 
 ```rust
-options.disable_experimental_mle = true;
+options = options.with_disable_experimental_mle(true);
 ```
 
 ## Single Inference

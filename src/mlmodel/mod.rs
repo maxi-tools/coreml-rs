@@ -91,6 +91,42 @@ impl Default for PredictRetryOptions {
     }
 }
 
+/// The attempt / predicate / backoff / propagate loop behind every
+/// `predict_with_retry*` method, as a free function over an arbitrary
+/// operation.
+///
+/// It is deliberately free of CoreML types so the retry semantics can be
+/// unit-tested without a loaded model -- which matters because no CI lane
+/// in this repo runs `cargo test` against real models, and because the
+/// semantics (does the predicate gate a retry? does the final error
+/// propagate? is the delay applied between attempts and not after the
+/// last?) are exactly the things worth pinning down.
+///
+/// `operation` is invoked once per attempt, so an implementation that
+/// needs to restore state between attempts can do so inside the closure.
+pub fn retry_with_backoff<T, E, F>(
+    options: PredictRetryOptions,
+    mut should_retry: impl FnMut(&E) -> bool,
+    mut operation: F,
+) -> Result<T, E>
+where
+    F: FnMut(usize) -> Result<T, E>,
+{
+    for attempt in 0..=options.max_retries {
+        match operation(attempt) {
+            Ok(value) => return Ok(value),
+            Err(err) if attempt < options.max_retries && should_retry(&err) => {
+                let delay = options.backoff.delay(attempt);
+                if !delay.is_zero() {
+                    std::thread::sleep(delay);
+                }
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    unreachable!("retry loop always returns from success or final failure")
+}
+
 impl PredictRetryOptions {
     pub const fn none() -> Self {
         Self {
@@ -652,6 +688,11 @@ impl CoreMLModelWithState {
 
     /// Like [`predict_with_retry`](Self::predict_with_retry), but only
     /// retries when `should_retry` returns `true` for the failure.
+    ///
+    /// See [`CoreMLModel::predict_with_retry_if`] for why a model with
+    /// inputs needs [`predict_with_rebind_retry`](Self::predict_with_rebind_retry)
+    /// instead: a failed predict clears the bindings, so retrying cannot
+    /// restore them from inside this type.
     pub fn predict_with_retry_if(
         &mut self,
         options: PredictRetryOptions,
@@ -661,6 +702,36 @@ impl CoreMLModelWithState {
             CoreMLModelWithState::Unloaded(_, _) => Err(CoreMLError::ModelNotLoaded),
             CoreMLModelWithState::Loaded(core_mlmodel, _, _) => {
                 core_mlmodel.predict_with_retry_if(options, should_retry)
+            }
+        }
+    }
+
+    /// Re-bind inputs and predict, retrying the whole cycle.
+    ///
+    /// The loaded-model case delegates to
+    /// [`CoreMLModel::predict_with_rebind_retry`]; the unloaded case
+    /// reports `ModelNotLoaded` rather than invoking the closure against
+    /// a model that does not exist.
+    pub fn predict_with_rebind_retry(
+        &mut self,
+        options: PredictRetryOptions,
+        rebind_and_predict: impl FnMut(&mut CoreMLModel) -> Result<MLModelOutput, CoreMLError>,
+    ) -> Result<MLModelOutput, CoreMLError> {
+        self.predict_with_rebind_retry_if(options, |_| true, rebind_and_predict)
+    }
+
+    /// [`predict_with_rebind_retry`](Self::predict_with_rebind_retry) with
+    /// a caller-supplied retry predicate.
+    pub fn predict_with_rebind_retry_if(
+        &mut self,
+        options: PredictRetryOptions,
+        should_retry: impl FnMut(&CoreMLError) -> bool,
+        rebind_and_predict: impl FnMut(&mut CoreMLModel) -> Result<MLModelOutput, CoreMLError>,
+    ) -> Result<MLModelOutput, CoreMLError> {
+        match self {
+            CoreMLModelWithState::Unloaded(_, _) => Err(CoreMLError::ModelNotLoaded),
+            CoreMLModelWithState::Loaded(core_mlmodel, _, _) => {
+                core_mlmodel.predict_with_rebind_retry_if(options, should_retry, rebind_and_predict)
             }
         }
     }
@@ -1332,24 +1403,67 @@ impl CoreMLModel {
         self.predict_with_retry_if(options, |_| true)
     }
 
+    /// Retry a predict that needs no input re-binding, retrying only when
+    /// `should_retry` accepts the failure.
+    ///
+    /// A failed `predict()` clears the Swift-side input dictionary
+    /// (`clearBindings()` in the `predict()` catch) and the Rust-side
+    /// `iosurface_bound_outputs` set, so this method cannot re-bind
+    /// anything -- `CoreMLModel` does not retain input data, because
+    /// `add_input` moves ownership into Swift's `self.dict`.
+    ///
+    /// That makes this method correct only where the retry does not need
+    /// the inputs back: models with no inputs, and models whose failure
+    /// path leaves the bindings installed. For a model with inputs, use
+    /// [`predict_with_rebind_retry`](Self::predict_with_rebind_retry),
+    /// which re-binds through a caller-supplied closure between attempts.
+    /// Retrying a bound-input model with this method will fail
+    /// identically on every attempt.
     pub fn predict_with_retry_if(
         &mut self,
         options: PredictRetryOptions,
-        mut should_retry: impl FnMut(&CoreMLError) -> bool,
+        should_retry: impl FnMut(&CoreMLError) -> bool,
     ) -> Result<MLModelOutput, CoreMLError> {
-        for attempt in 0..=options.max_retries {
-            match self.predict() {
-                Ok(out) => return Ok(out),
-                Err(err) if attempt < options.max_retries && should_retry(&err) => {
-                    let delay = options.backoff.delay(attempt);
-                    if !delay.is_zero() {
-                        std::thread::sleep(delay);
-                    }
-                }
-                Err(err) => return Err(err),
-            }
-        }
-        unreachable!("retry loop always returns from success or final failure")
+        retry_with_backoff(options, should_retry, |_| self.predict())
+    }
+
+    /// Re-bind inputs and predict, retrying the whole cycle.
+    ///
+    /// `rebind_and_predict` is called once per attempt and is expected to
+    /// re-install the model's inputs before calling
+    /// [`predict`](Self::predict). Use this for any model that takes
+    /// inputs: the first attempt's failure clears the bindings, so a
+    /// retry that only re-runs `predict()` would run with an empty input
+    /// dictionary and fail the same way every time.
+    ///
+    /// ```no_run
+    /// # use coreml_rs_fork::{CoreMLModelWithState, PredictRetryOptions, CoreMLError};
+    /// # fn demo(mut model: CoreMLModelWithState, tensor: ndarray::ArrayD<f32>) -> Result<(), CoreMLError> {
+    /// let options = PredictRetryOptions::fixed(3, std::time::Duration::from_millis(50));
+    /// let out = model.predict_with_rebind_retry(options, |model| {
+    ///     model.add_input("image", tensor.clone())?;
+    ///     model.predict()
+    /// })?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn predict_with_rebind_retry(
+        &mut self,
+        options: PredictRetryOptions,
+        rebind_and_predict: impl FnMut(&mut Self) -> Result<MLModelOutput, CoreMLError>,
+    ) -> Result<MLModelOutput, CoreMLError> {
+        self.predict_with_rebind_retry_if(options, |_| true, rebind_and_predict)
+    }
+
+    /// [`predict_with_rebind_retry`](Self::predict_with_rebind_retry) with
+    /// a caller-supplied retry predicate.
+    pub fn predict_with_rebind_retry_if(
+        &mut self,
+        options: PredictRetryOptions,
+        should_retry: impl FnMut(&CoreMLError) -> bool,
+        rebind_and_predict: impl FnMut(&mut Self) -> Result<MLModelOutput, CoreMLError>,
+    ) -> Result<MLModelOutput, CoreMLError> {
+        retry_with_backoff(options, should_retry, |_| rebind_and_predict(self))
     }
 
     pub fn description(&self) -> crate::description::ModelDescription {
@@ -1700,6 +1814,184 @@ mod retry_backoff_tests {
         };
         assert_eq!(backoff.delay(0), Duration::ZERO);
         assert_eq!(backoff.delay(10), Duration::ZERO);
+    }
+
+    // ---- retry_with_backoff: the attempt loop itself --------------------
+    //
+    // No CoreML model is involved here, so these pin the retry semantics
+    // directly: how many times the operation runs, whether the predicate
+    // gates a retry, and which error comes out.
+
+    #[test]
+    fn retry_with_backoff_succeeds_on_first_attempt_without_retrying() {
+        let mut calls = 0;
+        let out = retry_with_backoff(
+            PredictRetryOptions::fixed(5, Duration::ZERO),
+            |_| true,
+            |_| {
+                calls += 1;
+                Ok::<_, CoreMLError>(42u32)
+            },
+        )
+        .unwrap();
+        assert_eq!(out, 42);
+        assert_eq!(calls, 1, "must not retry after a success");
+    }
+
+    #[test]
+    fn retry_with_backoff_retries_until_success_and_reports_attempt_count() {
+        let mut calls = 0;
+        let mut seen_attempts = Vec::new();
+        let out = retry_with_backoff(
+            PredictRetryOptions::fixed(5, Duration::ZERO),
+            |_| true,
+            |attempt| {
+                seen_attempts.push(attempt);
+                calls += 1;
+                if calls < 3 {
+                    Err(CoreMLError::UnknownError("transient".to_string()))
+                } else {
+                    Ok(calls as u32)
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(out, 3);
+        assert_eq!(calls, 3);
+        // The closure is told which attempt it is, so a rebind
+        // implementation can vary per attempt.
+        assert_eq!(seen_attempts, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn retry_with_backoff_stops_after_max_retries_and_propagates_final_error() {
+        let mut calls = 0;
+        let err = retry_with_backoff(
+            PredictRetryOptions::fixed(3, Duration::ZERO),
+            |_| true,
+            |_| {
+                calls += 1;
+                Err::<u32, _>(CoreMLError::UnknownError(format!("fail {calls}")))
+            },
+        )
+        .unwrap_err();
+        // 1 initial attempt + max_retries.
+        assert_eq!(calls, 4);
+        match err {
+            CoreMLError::UnknownError(msg) => assert_eq!(msg, "fail 4"),
+        }
+    }
+
+    #[test]
+    fn retry_with_backoff_predicate_can_short_circuit_retries() {
+        let mut calls = 0;
+        let err = retry_with_backoff(
+            PredictRetryOptions::fixed(10, Duration::ZERO),
+            // Only retry the first failure; a non-retryable error stops immediately.
+            |err| matches!(err, CoreMLError::UnknownError(m) if m == "retryable"),
+            |_| {
+                calls += 1;
+                Err::<u32, _>(CoreMLError::UnknownError("fatal".to_string()))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(calls, 1, "a fatal error must not be retried");
+        match err {
+            CoreMLError::UnknownError(msg) => assert_eq!(msg, "fatal"),
+        }
+    }
+
+    #[test]
+    fn retry_with_backoff_zero_retries_runs_the_operation_once() {
+        let mut calls = 0;
+        let err = retry_with_backoff(
+            PredictRetryOptions::none(),
+            |_| true,
+            |_| {
+                calls += 1;
+                Err::<u32, _>(CoreMLError::ModelNotLoaded)
+            },
+        )
+        .unwrap_err();
+        assert_eq!(calls, 1);
+        assert!(matches!(err, CoreMLError::ModelNotLoaded));
+    }
+
+    /// The re-bind contract: a fresh attempt must re-establish whatever
+    /// the previous failure tore down. The closure here models what
+    /// `predict_with_rebind_retry` asks callers to do -- re-install
+    /// inputs, then predict -- and asserts the retry actually re-ran it
+    /// rather than predicting with stale (or empty) bindings.
+    #[test]
+    fn retry_with_backoff_reruns_the_whole_operation_per_attempt() {
+        let mut bindings = Vec::<&'static str>::new();
+        let mut predictions = 0;
+
+        let out = retry_with_backoff(
+            PredictRetryOptions::fixed(4, Duration::ZERO),
+            |_| true,
+            |_| {
+                // Stand-in for `model.add_input(..)?`.
+                bindings.push("image");
+                predictions += 1;
+                if predictions < 3 {
+                    Err(CoreMLError::UnknownError("transient".to_string()))
+                } else {
+                    Ok(bindings.len())
+                }
+            },
+        )
+        .unwrap();
+
+        assert_eq!(out, 3);
+        assert_eq!(bindings.len(), 3, "each attempt must re-bind");
+        assert_eq!(predictions, 3);
+    }
+
+    #[test]
+    fn retry_with_backoff_applies_backoff_between_attempts_only() {
+        // Zero-duration backoff keeps the test fast; this asserts the
+        // loop structure (max_retries + 1 attempts) rather than wall time.
+        let mut attempts = 0;
+        let _ = retry_with_backoff(
+            PredictRetryOptions::exponential(2, Duration::ZERO, 2.0, Duration::from_secs(1)),
+            |_| true,
+            |_| {
+                attempts += 1;
+                Err::<(), _>(CoreMLError::UnknownError("x".to_string()))
+            },
+        );
+        assert_eq!(attempts, 3);
+    }
+
+    #[test]
+    fn retry_with_backoff_handles_a_recovering_operation_with_exponential_backoff() {
+        let start = std::time::Instant::now();
+        let mut calls = 0;
+        let out = retry_with_backoff(
+            PredictRetryOptions::exponential(
+                3,
+                Duration::from_millis(5),
+                2.0,
+                Duration::from_millis(100),
+            ),
+            |_| true,
+            |_| {
+                calls += 1;
+                if calls < 3 {
+                    Err(CoreMLError::UnknownError("transient".to_string()))
+                } else {
+                    Ok("recovered")
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(out, "recovered");
+        // 5ms + 10ms of sleep, so at least 15ms must have elapsed.
+        assert!(
+            start.elapsed() >= Duration::from_millis(15),
+            "backoff sleeps must actually be applied between attempts"
+        );
     }
 
     #[test]

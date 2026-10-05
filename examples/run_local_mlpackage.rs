@@ -139,39 +139,29 @@ impl Args {
         while let Some(arg) = args.next() {
             match arg.to_string_lossy().as_ref() {
                 "--output-dir" => {
-                    let value = args.next().context(
-                        "usage: cargo run --example run_local_mlpackage -- <model> [image] [--output-dir DIR] [--no-output-files]",
-                    )?;
+                    let value = args.next().context(USAGE)?;
                     output_dir = Some(PathBuf::from(value));
                 }
                 "--no-output-files" => output_dir = None,
                 "--pixel-scale" => {
-                    let value = args.next().context(
-                        "usage: cargo run --example run_local_mlpackage -- <model> [image] [second-image] [--pixel-scale unit|byte] [--output-dir DIR] [--no-output-files]",
-                    )?;
+                    let value = args.next().context(USAGE)?;
                     pixel_scale = PixelScale::parse(&value)?;
                 }
                 "--compute" => {
-                    let value = args.next().context(
-                        "usage: cargo run --example run_local_mlpackage -- <model> [image] [second-image] [--compute ane|gpu|cpu] [--pixel-scale unit|byte] [--output-dir DIR] [--no-output-files]",
-                    )?;
+                    let value = args.next().context(USAGE)?;
                     compute_platform = parse_compute_platform(&value)?;
                 }
                 "--normalize-input-by-255" => bail!(
                     "--normalize-input-by-255 was removed; use --pixel-scale unit (0..1) \
                      or --pixel-scale byte (0..255) instead"
                 ),
-                "--help" | "-h" => bail!(
-                    "usage: cargo run --example run_local_mlpackage -- <model> [image] [second-image] [--compute ane|gpu|cpu] [--pixel-scale unit|byte] [--output-dir DIR] [--no-output-files]"
-                ),
+                "--help" | "-h" => bail!(USAGE),
                 _ => positionals.push(arg),
             }
         }
 
         if positionals.is_empty() || positionals.len() > 3 {
-            bail!(
-                "usage: cargo run --example run_local_mlpackage -- <model> [image] [second-image] [--output-dir DIR] [--no-output-files]"
-            );
+            bail!(USAGE);
         }
 
         let model_path = PathBuf::from(&positionals[0]);
@@ -199,7 +189,10 @@ fn parse_compute_platform(value: &OsString) -> Result<ComputePlatform> {
         "ane" | "cpu-and-ane" | "cpu_and_ane" => Ok(ComputePlatform::CpuAndANE),
         "gpu" | "cpu-and-gpu" | "cpu_and_gpu" => Ok(ComputePlatform::CpuAndGpu),
         "cpu" | "cpu-only" | "cpu_only" => Ok(ComputePlatform::Cpu),
-        value => bail!("unknown compute platform `{value}`, expected `ane`, `gpu`, or `cpu`"),
+        "all" => Ok(ComputePlatform::All),
+        value => {
+            bail!("unknown compute platform `{value}`, expected `ane`, `gpu`, `cpu`, or `all`")
+        }
     }
 }
 
@@ -232,6 +225,11 @@ impl PixelScale {
         }
     }
 }
+
+/// Single source of truth for this example's CLI. Every usage path --
+/// `--help`, missing option values, and bad positional counts --
+/// prints this, so they cannot drift apart.
+const USAGE: &str = "usage: cargo run --example run_local_mlpackage -- <model> [image] [second-image] [--compute ane|gpu|cpu|all] [--pixel-scale unit|byte] [--output-dir DIR] [--no-output-files]";
 
 enum InputSource {
     Image(PathBuf),

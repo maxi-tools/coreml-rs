@@ -44,7 +44,7 @@ fn retry_vitae_under_concurrent_load() {
         "baseline",
         compute_platform,
         disable_experimental_mle,
-        PredictRetryOptions::none(),
+        None,
     );
     let retry = run_retry.then(|| {
         stress_predict(
@@ -55,12 +55,15 @@ fn retry_vitae_under_concurrent_load() {
             "retry",
             compute_platform,
             disable_experimental_mle,
-            PredictRetryOptions::fixed(max_retries, Duration::from_millis(10)),
+            Some(PredictRetryOptions::fixed(
+                max_retries,
+                Duration::from_millis(10),
+            )),
         )
     });
 
     eprintln!(
-        "coreml stress: models={}, workers={workers}, total_iterations={total_iterations}, compute={}, disable_experimental_mle={disable_experimental_mle}, baseline_failures={}, retry_failures={}",
+        "coreml stress: models={}, workers={workers}, total_iterations={total_iterations}, compute={}, disable_experimental_mle={disable_experimental_mle}, baseline_failures={}, retry_failures={}, retries_attempted={}",
         model_paths
             .iter()
             .map(|path| path.file_name().unwrap().to_string_lossy())
@@ -71,6 +74,10 @@ fn retry_vitae_under_concurrent_load() {
         retry
             .as_ref()
             .map(|result| result.failures.to_string())
+            .unwrap_or_else(|| "skipped".to_string()),
+        retry
+            .as_ref()
+            .map(|result| result.retries.to_string())
             .unwrap_or_else(|| "skipped".to_string())
     );
     baseline
@@ -92,10 +99,36 @@ fn retry_vitae_under_concurrent_load() {
             "baseline run did not reproduce prediction failures"
         );
     }
+
     if let Some(retry) = retry {
+        // Guard against a vacuous comparison. With a clean baseline the
+        // assertion below is `0 <= 0`, which passes whether or not the
+        // retry logic works at all -- so a retry run requires the
+        // baseline to have actually failed.
+        assert!(
+            baseline.failures > 0,
+            "baseline run did not reproduce prediction failures; the retry \
+             comparison would be vacuous (set \
+             COREML_RETRY_STRESS_REQUIRE_BASELINE_FAILURE=0 to accept that)"
+        );
+
+        // And the retry path must have run. Without this, a regression
+        // that set max_retries to 0 -- or that dropped the per-attempt
+        // re-bind -- would still pass the failure-count comparison.
+        assert!(
+            retry.retries > 0,
+            "no retries were attempted, so predict_with_rebind_retry_if never \
+             reached a second attempt (max_retries={max_retries})"
+        );
         assert!(
             retry.failures <= baseline.failures,
-            "retry should not increase final prediction failures"
+            "retry should not increase final prediction failures: baseline={} retry={}",
+            baseline.failures,
+            retry.failures
+        );
+        eprintln!(
+            "coreml stress: {} retries attempted, baseline_failures={}, retry_failures={}",
+            retry.retries, baseline.failures, retry.failures
         );
     }
 }
@@ -104,6 +137,9 @@ struct StressResult {
     completed: usize,
     predictions: usize,
     failures: usize,
+    /// Number of retry attempts actually made. Zero means the retry path
+    /// never ran, which makes any failure-count comparison vacuous.
+    retries: usize,
     sample_errors: Vec<String>,
     timings: StressTimings,
 }
@@ -116,13 +152,16 @@ fn stress_predict(
     label: &'static str,
     compute_platform: ComputePlatform,
     disable_experimental_mle: bool,
-    retry_options: PredictRetryOptions,
+    retry_options: Option<PredictRetryOptions>,
 ) -> StressResult {
     let start = Instant::now();
     let completed = Arc::new(AtomicUsize::new(0));
     let predictions = Arc::new(AtomicUsize::new(0));
     let failures = Arc::new(AtomicUsize::new(0));
     let sample_errors = Arc::new(Mutex::new(Vec::new()));
+    // Counts retries actually attempted, so the test can assert the retry
+    // path ran rather than assuming it did.
+    let retries = Arc::new(AtomicUsize::new(0));
     let timings = Arc::new(StressTimings::default());
     let mut handles = Vec::with_capacity(workers);
 
@@ -140,6 +179,7 @@ fn stress_predict(
         let predictions = Arc::clone(&predictions);
         let failures = Arc::clone(&failures);
         let sample_errors = Arc::clone(&sample_errors);
+        let retries = Arc::clone(&retries);
         let timings = Arc::clone(&timings);
         handles.push(thread::spawn(move || {
             let mut rng = XorShift64::new(0x4d595df4d0f33173 ^ worker_idx as u64);
@@ -155,19 +195,40 @@ fn stress_predict(
                         .input_ns
                         .fetch_add(duration_ns(input_start.elapsed()), Ordering::Relaxed);
 
+                    // Bind and predict as one retryable unit.
+                    //
+                    // A failed predict clears the Swift-side input dict
+                    // (`clearBindings()` in the `predict()` catch), so a
+                    // retry has to re-install the inputs. `input` is
+                    // cloned per attempt rather than moved because the
+                    // closure can run more than once.
                     let bind_start = Instant::now();
                     let model = stress_model.model.get();
-                    if let Err(err) = model.add_input(stress_model.input_name.as_str(), input) {
-                        eprintln!("failed to add input for {}: {err}", stress_model.name);
-                        failures.fetch_add(1, Ordering::Relaxed);
-                        continue;
-                    }
+                    let input_name = stress_model.input_name.clone();
+                    let retry_counters = Arc::clone(&retries);
+                    let result = match retry_options {
+                        Some(options) => model.predict_with_rebind_retry_if(
+                            options,
+                            move |err| {
+                                retry_counters.fetch_add(1, Ordering::Relaxed);
+                                true
+                            },
+                            |model| {
+                                model.add_input(&input_name, input.clone())?;
+                                model.predict()
+                            },
+                        ),
+                        None => {
+                            model.add_input(&input_name, input.clone())?;
+                            model.predict()
+                        }
+                    };
                     timings
                         .bind_ns
                         .fetch_add(duration_ns(bind_start.elapsed()), Ordering::Relaxed);
 
                     let predict_start = Instant::now();
-                    if let Err(err) = model.predict_with_retry(retry_options) {
+                    if let Err(err) = result {
                         failures.fetch_add(1, Ordering::Relaxed);
                         let mut sample_errors = sample_errors.lock().unwrap();
                         if sample_errors.len() < 8 {
@@ -198,6 +259,7 @@ fn stress_predict(
     let completed = completed.load(Ordering::Relaxed);
     let predictions = predictions.load(Ordering::Relaxed);
     let failures = failures.load(Ordering::Relaxed);
+    let retries = retries.load(Ordering::Relaxed);
     let sample_errors = Arc::try_unwrap(sample_errors)
         .expect("all workers should have released sample error collector")
         .into_inner()
@@ -208,6 +270,7 @@ fn stress_predict(
         completed,
         predictions,
         failures,
+        retries,
         sample_errors,
         timings,
     }
