@@ -731,7 +731,7 @@ impl CoreMLModelWithState {
         &mut self,
         options: PredictRetryOptions,
         should_retry: impl FnMut(&CoreMLError) -> bool,
-        rebind_and_predict: impl FnMut(&mut CoreMLModel) -> Result<MLModelOutput, CoreMLError>,
+        mut rebind_and_predict: impl FnMut(&mut CoreMLModel) -> Result<MLModelOutput, CoreMLError>,
     ) -> Result<MLModelOutput, CoreMLError> {
         match self {
             CoreMLModelWithState::Unloaded(_, _) => Err(CoreMLError::ModelNotLoaded),
@@ -1466,7 +1466,7 @@ impl CoreMLModel {
         &mut self,
         options: PredictRetryOptions,
         should_retry: impl FnMut(&CoreMLError) -> bool,
-        rebind_and_predict: impl FnMut(&mut Self) -> Result<MLModelOutput, CoreMLError>,
+        mut rebind_and_predict: impl FnMut(&mut Self) -> Result<MLModelOutput, CoreMLError>,
     ) -> Result<MLModelOutput, CoreMLError> {
         retry_with_backoff(options, should_retry, |_| rebind_and_predict(self))
     }
@@ -1882,9 +1882,7 @@ mod retry_backoff_tests {
         .unwrap_err();
         // 1 initial attempt + max_retries.
         assert_eq!(calls, 4);
-        match err {
-            CoreMLError::UnknownError(msg) => assert_eq!(msg, "fail 4"),
-        }
+        assert_eq!(err.to_string(), "UnknownError: fail 4");
     }
 
     #[test]
@@ -1901,9 +1899,7 @@ mod retry_backoff_tests {
         )
         .unwrap_err();
         assert_eq!(calls, 1, "a fatal error must not be retried");
-        match err {
-            CoreMLError::UnknownError(msg) => assert_eq!(msg, "fatal"),
-        }
+        assert_eq!(err.to_string(), "UnknownError: fatal");
     }
 
     #[test]
