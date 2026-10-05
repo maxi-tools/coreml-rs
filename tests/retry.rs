@@ -10,7 +10,7 @@ use std::{
 };
 
 use coreml_rs_fork::{
-    ComputePlatform, CoreMLModelOptions, CoreMLModelWithState, PredictRetryOptions,
+    ComputePlatform, CoreMLModel, CoreMLModelOptions, CoreMLModelWithState, PredictRetryOptions,
 };
 use ndarray::{ArrayD, IxDyn};
 
@@ -252,7 +252,7 @@ fn stress_predict(config: &StressConfig, run: &StressRun) -> StressResult {
                             // change, which is well out of scope for a
                             // stress test.
                             #[allow(clippy::result_large_err)]
-                            let rebind = |model: &mut CoreMLModelWithState| {
+                            let rebind = |model: &mut CoreMLModel| {
                                 model.add_input(&input_name, input.clone())?;
                                 model.predict()
                             };
