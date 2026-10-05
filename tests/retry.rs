@@ -34,14 +34,15 @@ fn retry_vitae_under_concurrent_load() {
         env_bool("COREML_RETRY_STRESS_DISABLE_EXPERIMENTAL_MLE").unwrap_or(false);
     let run_retry = env_bool("COREML_RETRY_STRESS_RUN_RETRY").unwrap_or(true);
 
-    // Three states, not two: unset (require a baseline failure), "0"
-    // (accept a clean baseline), any other value (require). Treating
-    // "0" as merely disabling the advisory check while an unconditional
-    // assertion below still demanded a failure made the documented
-    // escape hatch do nothing.
+    // Three states, not two: unset means "require a baseline failure",
+    // `"0"` means "accept a clean baseline", any other value also
+    // requires. Reading it as two states (`!= "0"`) meant an unset
+    // variable skipped the guard, and since `run_retry` defaults to true
+    // a default run on a healthy machine would silently skip the check
+    // that exists to stop the comparison being vacuous.
     let baseline_failure_env = std::env::var_os("COREML_RETRY_STRESS_REQUIRE_BASELINE_FAILURE");
-    let require_baseline_failure = baseline_failure_env.as_ref().is_some_and(|v| v != "0");
     let accept_clean_baseline = baseline_failure_env.as_ref().is_some_and(|v| v == "0");
+    let require_baseline_failure = !accept_clean_baseline;
 
     // Everything except which pass this is is identical between the two,
     // so it is built once and shared.
