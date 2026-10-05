@@ -52,8 +52,26 @@ impl RetryBackoff {
                 max,
             } => {
                 let multiplier = multiplier.max(1.0);
-                let delay = initial.mul_f64(multiplier.powi(retry_index as i32));
-                delay.min(max)
+                // Scale in f64 seconds rather than with `Duration::mul_f64`.
+                //
+                // `mul_f64` panics on a non-finite factor or on overflow, and
+                // `multiplier.powi(retry_index)` produces exactly that once the
+                // index or the multiplier is large enough -- which turns a slow
+                // retry loop into a crash in a library that maxi-ml links.
+                // Clamping against `max` before constructing the Duration means
+                // the f64 intermediate can be saturating without ever reaching
+                // the panicking constructor.
+                //
+                // `retry_index` is clamped to i32::MAX because the `as i32` cast
+                // is a wrapping cast for indices above 2^31-1; saturating there
+                // is harmless because the result is clamped to `max` anyway.
+                let exponent = retry_index.min(i32::MAX as usize) as i32;
+                let scaled = initial.as_secs_f64() * multiplier.powi(exponent);
+                if scaled.is_finite() && scaled >= 0.0 && scaled < max.as_secs_f64() {
+                    Duration::from_secs_f64(scaled)
+                } else {
+                    max
+                }
             }
         }
     }
@@ -1594,4 +1612,126 @@ fn reinterpret_u16_to_f16(input: ndarray::ArrayD<u16>) -> ndarray::ArrayD<half::
         Vec::from_raw_parts(ptr, len, capacity)
     };
     ndarray::ArrayD::from_shape_vec(ndarray::IxDyn(&shape), raw_vec_f16).unwrap()
+}
+
+#[cfg(test)]
+mod retry_backoff_tests {
+    use super::*;
+
+    #[test]
+    fn none_backoff_is_always_zero() {
+        let backoff = RetryBackoff::None;
+        assert_eq!(backoff.delay(0), Duration::ZERO);
+        assert_eq!(backoff.delay(1000), Duration::ZERO);
+    }
+
+    #[test]
+    fn fixed_backoff_ignores_index() {
+        let backoff = RetryBackoff::Fixed(Duration::from_millis(25));
+        assert_eq!(backoff.delay(0), Duration::from_millis(25));
+        assert_eq!(backoff.delay(7), Duration::from_millis(25));
+    }
+
+    #[test]
+    fn exponential_backoff_grows_then_clamps() {
+        let backoff = RetryBackoff::Exponential {
+            initial: Duration::from_millis(10),
+            multiplier: 2.0,
+            max: Duration::from_millis(100),
+        };
+        assert_eq!(backoff.delay(0), Duration::from_millis(10));
+        assert_eq!(backoff.delay(1), Duration::from_millis(20));
+        assert_eq!(backoff.delay(2), Duration::from_millis(40));
+        // Clamped at max from here on.
+        assert_eq!(backoff.delay(3), Duration::from_millis(80));
+        assert_eq!(backoff.delay(4), Duration::from_millis(100));
+        assert_eq!(backoff.delay(50), Duration::from_millis(100));
+    }
+
+    #[test]
+    fn exponential_backoff_multiplier_below_one_is_treated_as_one() {
+        let backoff = RetryBackoff::Exponential {
+            initial: Duration::from_millis(10),
+            multiplier: 0.25,
+            max: Duration::from_millis(100),
+        };
+        // multiplier.max(1.0) => 1.0, so no decay.
+        assert_eq!(backoff.delay(0), Duration::from_millis(10));
+        assert_eq!(backoff.delay(3), Duration::from_millis(10));
+    }
+
+    /// Regression: `Duration::mul_f64` panics on a non-finite factor.
+    /// `powi` overflows to infinity well before the retry index is
+    /// exhausted, so the delay must saturate at `max` instead.
+    #[test]
+    fn exponential_backoff_saturates_instead_of_panicking() {
+        let backoff = RetryBackoff::Exponential {
+            initial: Duration::from_secs(1),
+            multiplier: 10.0,
+            max: Duration::from_secs(30),
+        };
+        // 10^309 overflows f64 to infinity.
+        assert_eq!(backoff.delay(309), Duration::from_secs(30));
+        assert_eq!(backoff.delay(4096), Duration::from_secs(30));
+        assert_eq!(backoff.delay(usize::MAX), Duration::from_secs(30));
+    }
+
+    /// Regression: the `retry_index as i32` cast wraps for indices above
+    /// 2^31-1. A wrapped (possibly negative) exponent must still saturate
+    /// at `max` rather than producing a nonsense small delay.
+    #[test]
+    fn exponential_backoff_handles_indices_above_i32_max() {
+        let backoff = RetryBackoff::Exponential {
+            initial: Duration::from_secs(1),
+            multiplier: 2.0,
+            max: Duration::from_secs(60),
+        };
+        let above = i32::MAX as usize + 1;
+        assert_eq!(backoff.delay(above), Duration::from_secs(60));
+        assert_eq!(backoff.delay(usize::MAX), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn exponential_backoff_with_zero_max_never_sleeps() {
+        let backoff = RetryBackoff::Exponential {
+            initial: Duration::from_secs(1),
+            multiplier: 2.0,
+            max: Duration::ZERO,
+        };
+        assert_eq!(backoff.delay(0), Duration::ZERO);
+        assert_eq!(backoff.delay(10), Duration::ZERO);
+    }
+
+    #[test]
+    fn retry_options_constructors_match_their_backoff() {
+        assert_eq!(PredictRetryOptions::none().max_retries, 0);
+        assert_eq!(PredictRetryOptions::none().backoff, RetryBackoff::None);
+
+        let fixed = PredictRetryOptions::fixed(3, Duration::from_millis(10));
+        assert_eq!(fixed.max_retries, 3);
+        assert_eq!(
+            fixed.backoff,
+            RetryBackoff::Fixed(Duration::from_millis(10))
+        );
+
+        let exp = PredictRetryOptions::exponential(
+            5,
+            Duration::from_millis(1),
+            3.0,
+            Duration::from_secs(2),
+        );
+        assert_eq!(exp.max_retries, 5);
+        assert_eq!(
+            exp.backoff,
+            RetryBackoff::Exponential {
+                initial: Duration::from_millis(1),
+                multiplier: 3.0,
+                max: Duration::from_secs(2),
+            }
+        );
+
+        // Default is the no-retry policy, and `predict()` uses it.
+        assert_eq!(PredictRetryOptions::default(), PredictRetryOptions::none());
+        assert_eq!(RetryBackoff::default(), RetryBackoff::None);
+    }
 }

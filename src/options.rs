@@ -69,11 +69,13 @@ impl std::fmt::Debug for CoreMLModelOptions {
                     ComputePlatform::All => &"All",
                 },
             )
+            .field("cache_dir", &self.cache_dir)
             .field(
                 "allow_low_precision_accumulation_on_gpu",
                 &self.allow_low_precision_accumulation_on_gpu,
             )
             .field("prediction_uses_cpu_only", &self.prediction_uses_cpu_only)
+            .field("disable_experimental_mle", &self.disable_experimental_mle)
             .finish()
     }
 }
@@ -92,19 +94,28 @@ mod tests {
     fn test_core_ml_model_options_debug() {
         let opts = CoreMLModelOptions::new()
             .with_compute_platform(ComputePlatform::Cpu)
+            .with_cache_dir("/tmp/coreml-cache")
             .with_allow_low_precision_accumulation_on_gpu(true)
-            .with_prediction_uses_cpu_only(false);
+            .with_prediction_uses_cpu_only(false)
+            .with_disable_experimental_mle(true);
 
         let debug_str = format!("{:?}", opts);
 
         assert!(debug_str.contains("CoreMLModelOptions"));
         assert!(debug_str.contains("compute_platform: \"CPU\""));
+        assert!(debug_str.contains("cache_dir"));
         assert!(debug_str.contains("allow_low_precision_accumulation_on_gpu: Some(true)"));
         assert!(debug_str.contains("prediction_uses_cpu_only: Some(false)"));
+        assert!(debug_str.contains("disable_experimental_mle: Some(true)"));
 
         let opts2 = CoreMLModelOptions::new().with_compute_platform(ComputePlatform::CpuAndANE);
         let debug_str2 = format!("{:?}", opts2);
         assert!(debug_str2.contains("compute_platform: \"CpuAndAne\""));
+        // Every field must be present even at its default.
+        assert!(debug_str2.contains("cache_dir"));
+        assert!(debug_str2.contains("allow_low_precision_accumulation_on_gpu"));
+        assert!(debug_str2.contains("prediction_uses_cpu_only"));
+        assert!(debug_str2.contains("disable_experimental_mle"));
 
         let opts3 = CoreMLModelOptions::new().with_compute_platform(ComputePlatform::CpuAndGpu);
         let debug_str3 = format!("{:?}", opts3);
