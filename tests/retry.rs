@@ -10,7 +10,7 @@ use std::{
 };
 
 use coreml_rs_fork::{
-    ComputePlatform, CoreMLModelOptions, CoreMLModelWithState, PredictRetryOptions,
+    ComputePlatform, CoreMLModel, CoreMLModelOptions, CoreMLModelWithState, PredictRetryOptions,
 };
 use ndarray::{ArrayD, IxDyn};
 
@@ -249,10 +249,14 @@ fn stress_predict(config: &StressConfig, run: &StressRun) -> StressResult {
                                 model.predict()
                             },
                         ),
-                        None => {
+                        None => (|model: &mut CoreMLModel| {
+                            // Routed through a closure so this arm has
+                            // the same shape as the retry arm and can
+                            // use `?`: the worker closure itself returns
+                            // `()`, so `?` cannot appear inline here.
                             model.add_input(&input_name, input.clone())?;
                             model.predict()
-                        }
+                        })(model),
                     };
                     timings
                         .bind_ns
