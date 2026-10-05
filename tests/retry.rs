@@ -10,7 +10,7 @@ use std::{
 };
 
 use coreml_rs_fork::{
-    ComputePlatform, CoreMLModel, CoreMLModelOptions, CoreMLModelWithState, PredictRetryOptions,
+    ComputePlatform, CoreMLModelOptions, CoreMLModelWithState, PredictRetryOptions,
 };
 use ndarray::{ArrayD, IxDyn};
 
@@ -240,7 +240,7 @@ fn stress_predict(config: &StressConfig, run: &StressRun) -> StressResult {
                     let result = match retry_options {
                         Some(options) => model.predict_with_rebind_retry_if(
                             options,
-                            move |err| {
+                            move |_err| {
                                 retry_counters.fetch_add(1, Ordering::Relaxed);
                                 true
                             },
@@ -249,7 +249,7 @@ fn stress_predict(config: &StressConfig, run: &StressRun) -> StressResult {
                                 model.predict()
                             },
                         ),
-                        None => (|model: &mut CoreMLModel| {
+                        None => (|model: &mut CoreMLModelWithState| {
                             // Routed through a closure so this arm has
                             // the same shape as the retry arm and can
                             // use `?`: the worker closure itself returns
