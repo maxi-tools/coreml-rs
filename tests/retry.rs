@@ -238,25 +238,44 @@ fn stress_predict(config: &StressConfig, run: &StressRun) -> StressResult {
                     let input_name = stress_model.input_name.clone();
                     let retry_counters = Arc::clone(&retries);
                     let result = match retry_options {
-                        Some(options) => model.predict_with_rebind_retry_if(
-                            options,
-                            move |_err| {
-                                retry_counters.fetch_add(1, Ordering::Relaxed);
-                                true
-                            },
-                            |model| {
+                        Some(options) => {
+                            // `result_large_err`: the rebind closure has to
+                            // return `Result<MLModelOutput, CoreMLError>`
+                            // because that is the shape
+                            // `predict_with_rebind_retry_if` accepts.
+                            // The lint is about a large `Err` being moved
+                            // through a *function* boundary by value; here
+                            // it is a required signature, and the enum's
+                            // size comes from `FailedToLoad` embedding a
+                            // model for error recovery. Boxing `CoreMLError`
+                            // to satisfy the lint would be a public API
+                            // change, which is well out of scope for a
+                            // stress test.
+                            #[allow(clippy::result_large_err)]
+                            let rebind = |model: &mut CoreMLModelWithState| {
                                 model.add_input(&input_name, input.clone())?;
                                 model.predict()
-                            },
-                        ),
-                        None => (|model: &mut CoreMLModelWithState| {
-                            // Routed through a closure so this arm has
-                            // the same shape as the retry arm and can
-                            // use `?`: the worker closure itself returns
-                            // `()`, so `?` cannot appear inline here.
-                            model.add_input(&input_name, input.clone())?;
-                            model.predict()
-                        })(model),
+                            };
+                            model.predict_with_rebind_retry_if(
+                                options,
+                                move |_err| {
+                                    retry_counters.fetch_add(1, Ordering::Relaxed);
+                                    true
+                                },
+                                rebind,
+                            )
+                        }
+                        // No closure here: a `Result`-returning closure
+                        // large enough trips clippy's `result_large_err`
+                        // (CoreMLError::FailedToLoad embeds a model), and
+                        // the worker closure returns `()` so `?` cannot
+                        // be used inline either. A failed bind is a
+                        // prediction failure, so it is reported the same
+                        // way.
+                        None => match model.add_input(&input_name, input.clone()) {
+                            Ok(()) => model.predict(),
+                            Err(err) => Err(err),
+                        },
                     };
                     timings
                         .bind_ns
