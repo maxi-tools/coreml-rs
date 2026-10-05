@@ -24,12 +24,12 @@ fn main() -> Result<()> {
     println!("Inputs:");
     for name in description.input_names() {
         let feature = &description.inputs[&name];
-        println!("  {} {} {:?}", name, feature.shape, feature.type_name);
+        println!("  {} {:?} {}", name, feature.shape, feature.type_name);
     }
     println!("Outputs:");
     for name in description.output_names() {
         let feature = &description.outputs[&name];
-        println!("  {} {} {:?}", name, feature.shape, feature.type_name);
+        println!("  {} {:?} {}", name, feature.shape, feature.type_name);
     }
 
     let input_shapes = model
