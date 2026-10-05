@@ -9,9 +9,7 @@ use std::path::{Path, PathBuf};
 fn main() -> Result<()> {
     let args = Args::parse()?;
 
-    let mut options = CoreMLModelOptions::default();
-    options.compute_platform = args.compute_platform;
-    // options.normalize_input_by_255 = args.normalize_input_by_255;
+    let options = CoreMLModelOptions::default().with_compute_platform(args.compute_platform);
 
     let mut model = CoreMLModelWithState::new(&args.model_path, options)
         .load()
@@ -128,7 +126,6 @@ struct Args {
     output_dir: Option<PathBuf>,
     pixel_scale: PixelScale,
     compute_platform: ComputePlatform,
-    normalize_input_by_255: bool,
 }
 
 impl Args {
@@ -137,7 +134,6 @@ impl Args {
         let mut output_dir = Some(PathBuf::from("target/coreml-outputs"));
         let mut pixel_scale = PixelScale::Unit;
         let mut compute_platform = ComputePlatform::CpuAndANE;
-        let mut normalize_input_by_255 = false;
         let mut args = std::env::args_os().skip(1).peekable();
 
         while let Some(arg) = args.next() {
@@ -161,9 +157,12 @@ impl Args {
                     )?;
                     compute_platform = parse_compute_platform(&value)?;
                 }
-                "--normalize-input-by-255" => normalize_input_by_255 = true,
+                "--normalize-input-by-255" => bail!(
+                    "--normalize-input-by-255 was removed; use --pixel-scale unit (0..1) \
+                     or --pixel-scale byte (0..255) instead"
+                ),
                 "--help" | "-h" => bail!(
-                    "usage: cargo run --example run_local_mlpackage -- <model> [image] [second-image] [--compute ane|gpu|cpu] [--pixel-scale unit|byte] [--normalize-input-by-255] [--output-dir DIR] [--no-output-files]"
+                    "usage: cargo run --example run_local_mlpackage -- <model> [image] [second-image] [--compute ane|gpu|cpu] [--pixel-scale unit|byte] [--output-dir DIR] [--no-output-files]"
                 ),
                 _ => positionals.push(arg),
             }
@@ -191,7 +190,6 @@ impl Args {
             output_dir,
             pixel_scale,
             compute_platform,
-            normalize_input_by_255,
         })
     }
 }

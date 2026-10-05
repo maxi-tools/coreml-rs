@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 fn main() -> Result<()> {
     let args = Args::parse()?;
 
-    let mut options = CoreMLModelOptions::default();
-    options.compute_platform = args.compute_platform;
-    options.disable_experimental_mle = Some(args.disable_experimental_mle);
+    let options = CoreMLModelOptions::default()
+        .with_compute_platform(args.compute_platform)
+        .with_disable_experimental_mle(args.disable_experimental_mle);
 
     let mut model = CoreMLModelWithState::new(&args.model_path, options)
         .load()

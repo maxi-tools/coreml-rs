@@ -229,9 +229,9 @@ fn load_stress_models(
     model_paths
         .iter()
         .map(|model_path| {
-            let mut options = CoreMLModelOptions::default();
-            options.compute_platform = compute_platform;
-            options.disable_experimental_mle = Some(disable_experimental_mle);
+            let options = CoreMLModelOptions::default()
+                .with_compute_platform(compute_platform)
+                .with_disable_experimental_mle(disable_experimental_mle);
 
             let load_start = Instant::now();
             let model = CoreMLModelWithState::new(model_path, options)
@@ -309,7 +309,7 @@ fn compute_platform_name(compute_platform: ComputePlatform) -> &'static str {
 }
 
 fn should_log_progress(progress_every: usize, completed: usize, iterations: usize) -> bool {
-    completed == iterations || (progress_every > 0 && completed % progress_every == 0)
+    completed == iterations || (progress_every > 0 && completed.is_multiple_of(progress_every))
 }
 
 fn worker_iterations(total_iterations: usize, workers: usize, worker_idx: usize) -> usize {
@@ -369,6 +369,24 @@ impl SharedModel {
         }
     }
 
+    // SAFETY CONTRACT: this is deliberately unsound.
+    //
+    // `get` hands every worker thread a `&mut` into the same
+    // `UnsafeCell<CoreMLModelWithState>`, so two threads can hold aliasing
+    // `&mut` simultaneously. That violates Stacked Borrows and is exactly
+    // what `clippy::mut_from_ref` denies by default -- correctly, since the
+    // helper would be a real bug in any non-test caller.
+    //
+    // It stays because this is an ignored stress test whose whole purpose is
+    // to reproduce the unsynchronized concurrent access the retry path is
+    // supposed to survive: it looks for CoreML/ANE failures, data
+    // corruption, and crashes under load, not for Rust-level safety. Making
+    // the borrow sound (one `Mutex` around the model) would serialize the
+    // threads and destroy the contention the test is measuring.
+    //
+    // The allow is scoped to this one function rather than the crate so that
+    // the lint stays armed everywhere else in the test.
+    #[allow(clippy::mut_from_ref)]
     fn get(&self) -> &mut CoreMLModelWithState {
         // This ignored stress test intentionally shares one loaded model across
         // threads without an external lock to reproduce the production access
