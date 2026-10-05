@@ -731,7 +731,7 @@ impl CoreMLModelWithState {
         &mut self,
         options: PredictRetryOptions,
         should_retry: impl FnMut(&CoreMLError) -> bool,
-        mut rebind_and_predict: impl FnMut(&mut CoreMLModel) -> Result<MLModelOutput, CoreMLError>,
+        rebind_and_predict: impl FnMut(&mut CoreMLModel) -> Result<MLModelOutput, CoreMLError>,
     ) -> Result<MLModelOutput, CoreMLError> {
         match self {
             CoreMLModelWithState::Unloaded(_, _) => Err(CoreMLError::ModelNotLoaded),
