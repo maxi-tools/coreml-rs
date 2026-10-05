@@ -97,13 +97,27 @@ Multiple error paths return `UnknownErrorStatic("failed to bind input to model")
 
 ### 11. CI/CD pipeline
 
-No CI configuration is present. Tests (`tests/load.rs`, `tests/retry.rs`) require local model files at `./demo/model.zip`, `./demo/model_3.mlmodel`, and `target/vitae.mlpackage`.
+CI is configured in `.github/workflows/ci.yml` and runs on a macOS
+runner:
 
-- Add a GitHub Actions workflow that:
-  - Verifies `cargo build` passes on macOS
-  - Runs unit tests with dummy model files (or a small test model checked into the repo)
-  - Runs `cargo clippy` and `cargo fmt --check`
-- Add a small test `.mlmodel` that exercises the load/predict/unload cycle
+- [x] `cargo fmt --all -- --check`
+- [x] `cargo check --all-targets` across three feature sets
+      (default, `minimal`, `all-features`)
+- [ ] **`cargo test` -- not run in CI.** No workflow in this repo executes
+      `cargo test` or `cargo nextest`. The unit tests in `src/` are
+      therefore never executed automatically, which is why the retry and
+      backoff semantics are covered by tests that need no model.
+
+Tests that need a real model (`tests/load.rs`, `tests/retry.rs`) require
+model files at `./demo/model.zip`, `./demo/model_3.mlmodel`, and
+`target/vitae.mlpackage`, and `tests/retry.rs` is `#[ignore]`d by
+default. So a test lane needs two things:
+
+- A `cargo test` step. Straightforward, and most of the suite would pass
+  without a model.
+- A small test `.mlmodel` exercising the load/predict/unload cycle, so
+  the model-dependent tests can run somewhere. That asset does not exist
+  yet and is the actual blocker.
 
 ### 12. Support non-MLMultiArray I/O
 
