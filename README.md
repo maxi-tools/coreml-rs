@@ -318,3 +318,13 @@ Contributions welcome! Areas of focus:
 - Extended platform support
 
 See [CLAUDE.md](../CLAUDE.md) in the monorepo for contribution guidelines.
+
+## Upstream Reference Docs
+
+The following guides come from the upstream
+[swarnimarun/coreml-rs](https://github.com/swarnimarun/coreml-rs) and are
+vendored under `docs/` for convenience:
+
+- [Setup Guide](docs/setup.md) — prerequisites, runtime dependencies, model formats, troubleshooting
+- [Usage Guide](docs/usage.md) — full API reference with examples
+- [Roadmap](docs/roadmap.md) — planned improvements and known issues

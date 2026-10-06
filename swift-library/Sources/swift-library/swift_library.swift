@@ -797,6 +797,7 @@ class Model: @unchecked Sendable {
 	var allowLowPrecisionAccumulationOnGPU: Bool? = nil
 	var predictionUsesCPUOnly: Bool? = nil
 	var state: Any? = nil  // MLState (macOS 15+), stored as Any for backwards compat
+	var disableExperimentalMLE: Bool = false
 
 	var failedToLoad: Bool
 	init(failedToLoad: Bool) {
@@ -819,12 +820,19 @@ class Model: @unchecked Sendable {
 		self.predictionUsesCPUOnly = enabled
 	}
 
+	func setDisableExperimentalMLE(disabled: Bool) {
+		self.disableExperimentalMLE = disabled
+	}
+
 	func load() -> Bool {
 		if hasFailedToLoad() { return false }
 		let config = MLModelConfiguration.init()
 		config.computeUnits = self.computeUnits
 		if let enabled = self.allowLowPrecisionAccumulationOnGPU {
 			config.allowLowPrecisionAccumulationOnGPU = enabled
+		}
+		if self.disableExperimentalMLE {
+			config.setValue(1, forKey: "experimentalMLE5EngineUsage")
 		}
 		do {
 			if self.compiledPath == nil {
