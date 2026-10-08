@@ -13,7 +13,156 @@ use std::{
     collections::HashMap,
     io::{Read, Write},
     path::{Path, PathBuf},
+    time::Duration,
 };
+
+/// Backoff schedule applied between retry attempts.
+///
+/// Mirrors `RetryBackoff` in upstream `swarnimarun/coreml-rs` (commit
+/// `82f6fa3` — feat: add support for local retry) so existing upstream
+/// callers can port without renaming.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RetryBackoff {
+    /// No delay between attempts.
+    None,
+    /// Constant delay between attempts.
+    Fixed(Duration),
+    /// Exponential growth, capped at `max`.
+    Exponential {
+        initial: Duration,
+        multiplier: f64,
+        max: Duration,
+    },
+}
+
+impl Default for RetryBackoff {
+    fn default() -> Self {
+        RetryBackoff::None
+    }
+}
+
+impl RetryBackoff {
+    fn delay(self, retry_index: usize) -> Duration {
+        match self {
+            RetryBackoff::None => Duration::ZERO,
+            RetryBackoff::Fixed(delay) => delay,
+            RetryBackoff::Exponential {
+                initial,
+                multiplier,
+                max,
+            } => {
+                let multiplier = multiplier.max(1.0);
+                // Scale in f64 seconds rather than with `Duration::mul_f64`.
+                //
+                // `mul_f64` panics on a non-finite factor or on overflow, and
+                // `multiplier.powi(retry_index)` produces exactly that once the
+                // index or the multiplier is large enough -- which turns a slow
+                // retry loop into a crash in a library that maxi-ml links.
+                // Clamping against `max` before constructing the Duration means
+                // the f64 intermediate can be saturating without ever reaching
+                // the panicking constructor.
+                //
+                // `retry_index` is clamped to i32::MAX because the `as i32` cast
+                // is a wrapping cast for indices above 2^31-1; saturating there
+                // is harmless because the result is clamped to `max` anyway.
+                let exponent = retry_index.min(i32::MAX as usize) as i32;
+                let scaled = initial.as_secs_f64() * multiplier.powi(exponent);
+                if scaled.is_finite() && scaled >= 0.0 && scaled < max.as_secs_f64() {
+                    Duration::from_secs_f64(scaled)
+                } else {
+                    max
+                }
+            }
+        }
+    }
+}
+
+/// Configures the retry methods on [`CoreMLModel`] and
+/// [`CoreMLModelWithState`]: `predict_with_retry{,_if}` and
+/// `predict_with_rebind_retry{,_if}`.
+///
+/// For a model that takes inputs, use the `rebind` variants -- a failed
+/// predict clears the input bindings, so a retry that does not re-bind
+/// cannot succeed.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PredictRetryOptions {
+    pub max_retries: usize,
+    pub backoff: RetryBackoff,
+}
+
+impl Default for PredictRetryOptions {
+    fn default() -> Self {
+        Self::none()
+    }
+}
+
+/// The attempt / predicate / backoff / propagate loop behind every
+/// `predict_with_retry*` method, as a free function over an arbitrary
+/// operation.
+///
+/// It is deliberately free of CoreML types so the retry semantics can be
+/// unit-tested without a loaded model -- which matters because no CI lane
+/// in this repo runs `cargo test` against real models, and because the
+/// semantics (does the predicate gate a retry? does the final error
+/// propagate? is the delay applied between attempts and not after the
+/// last?) are exactly the things worth pinning down.
+///
+/// `operation` is invoked once per attempt, so an implementation that
+/// needs to restore state between attempts can do so inside the closure.
+pub fn retry_with_backoff<T, E, F>(
+    options: PredictRetryOptions,
+    mut should_retry: impl FnMut(&E) -> bool,
+    mut operation: F,
+) -> Result<T, E>
+where
+    F: FnMut(usize) -> Result<T, E>,
+{
+    for attempt in 0..=options.max_retries {
+        match operation(attempt) {
+            Ok(value) => return Ok(value),
+            Err(err) if attempt < options.max_retries && should_retry(&err) => {
+                let delay = options.backoff.delay(attempt);
+                if !delay.is_zero() {
+                    std::thread::sleep(delay);
+                }
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    unreachable!("retry loop always returns from success or final failure")
+}
+
+impl PredictRetryOptions {
+    pub const fn none() -> Self {
+        Self {
+            max_retries: 0,
+            backoff: RetryBackoff::None,
+        }
+    }
+
+    pub const fn fixed(max_retries: usize, delay: Duration) -> Self {
+        Self {
+            max_retries,
+            backoff: RetryBackoff::Fixed(delay),
+        }
+    }
+
+    pub const fn exponential(
+        max_retries: usize,
+        initial: Duration,
+        multiplier: f64,
+        max: Duration,
+    ) -> Self {
+        Self {
+            max_retries,
+            backoff: RetryBackoff::Exponential {
+                initial,
+                multiplier,
+                max,
+            },
+        }
+    }
+}
 
 pub use crate::swift::MLModelOutput;
 
@@ -351,6 +500,18 @@ impl CoreMLModelWithState {
         }
     }
 
+    /// Returns the shape of every input feature, or `Err(ModelNotLoaded)`
+    /// when the model has not been loaded yet.
+    pub fn input_shapes(&self) -> Result<HashMap<String, Vec<usize>>, CoreMLError> {
+        Ok(self.description()?.input_shapes())
+    }
+
+    /// Returns the shape of every output feature, or `Err(ModelNotLoaded)`
+    /// when the model has not been loaded yet.
+    pub fn output_shapes(&self) -> Result<HashMap<String, Vec<usize>>, CoreMLError> {
+        Ok(self.description()?.output_shapes())
+    }
+
     pub fn add_input(
         &mut self,
         tag: impl AsRef<str>,
@@ -520,6 +681,66 @@ impl CoreMLModelWithState {
         }
     }
 
+    /// Predict with a retry policy. Re-runs `predict()` up to
+    /// `options.max_retries` additional times on failure, sleeping between
+    /// attempts according to `options.backoff`.
+    pub fn predict_with_retry(
+        &mut self,
+        options: PredictRetryOptions,
+    ) -> Result<MLModelOutput, CoreMLError> {
+        self.predict_with_retry_if(options, |_| true)
+    }
+
+    /// Like [`predict_with_retry`](Self::predict_with_retry), but only
+    /// retries when `should_retry` returns `true` for the failure.
+    ///
+    /// See [`CoreMLModel::predict_with_retry_if`] for why a model with
+    /// inputs needs [`predict_with_rebind_retry`](Self::predict_with_rebind_retry)
+    /// instead: a failed predict clears the bindings, so retrying cannot
+    /// restore them from inside this type.
+    pub fn predict_with_retry_if(
+        &mut self,
+        options: PredictRetryOptions,
+        should_retry: impl FnMut(&CoreMLError) -> bool,
+    ) -> Result<MLModelOutput, CoreMLError> {
+        match self {
+            CoreMLModelWithState::Unloaded(_, _) => Err(CoreMLError::ModelNotLoaded),
+            CoreMLModelWithState::Loaded(core_mlmodel, _, _) => {
+                core_mlmodel.predict_with_retry_if(options, should_retry)
+            }
+        }
+    }
+
+    /// Re-bind inputs and predict, retrying the whole cycle.
+    ///
+    /// The loaded-model case delegates to
+    /// [`CoreMLModel::predict_with_rebind_retry`]; the unloaded case
+    /// reports `ModelNotLoaded` rather than invoking the closure against
+    /// a model that does not exist.
+    pub fn predict_with_rebind_retry(
+        &mut self,
+        options: PredictRetryOptions,
+        rebind_and_predict: impl FnMut(&mut CoreMLModel) -> Result<MLModelOutput, CoreMLError>,
+    ) -> Result<MLModelOutput, CoreMLError> {
+        self.predict_with_rebind_retry_if(options, |_| true, rebind_and_predict)
+    }
+
+    /// [`predict_with_rebind_retry`](Self::predict_with_rebind_retry) with
+    /// a caller-supplied retry predicate.
+    pub fn predict_with_rebind_retry_if(
+        &mut self,
+        options: PredictRetryOptions,
+        should_retry: impl FnMut(&CoreMLError) -> bool,
+        rebind_and_predict: impl FnMut(&mut CoreMLModel) -> Result<MLModelOutput, CoreMLError>,
+    ) -> Result<MLModelOutput, CoreMLError> {
+        match self {
+            CoreMLModelWithState::Unloaded(_, _) => Err(CoreMLError::ModelNotLoaded),
+            CoreMLModelWithState::Loaded(core_mlmodel, _, _) => {
+                core_mlmodel.predict_with_rebind_retry_if(options, should_retry, rebind_and_predict)
+            }
+        }
+    }
+
     pub fn make_state(&mut self) -> Result<(), CoreMLError> {
         match self {
             CoreMLModelWithState::Unloaded(_, _) => Err(CoreMLError::ModelNotLoaded),
@@ -625,6 +846,9 @@ impl CoreMLModel {
         }
         if let Some(enabled) = opts.prediction_uses_cpu_only {
             model.setPredictionUsesCPUOnly(enabled);
+        }
+        if let Some(disabled) = opts.disable_experimental_mle {
+            model.setDisableExperimentalMLE(disabled);
         }
         model
     }
@@ -1174,6 +1398,79 @@ impl CoreMLModel {
         self.predict_inner(true, |model: &Model| model.predictWithState())
     }
 
+    /// Run `predict` under a retry policy. Each retry re-runs the full
+    /// inner predict path (including output buffer rebinding), so
+    /// transient CoreML/ANE errors are cleared before the next attempt.
+    pub fn predict_with_retry(
+        &mut self,
+        options: PredictRetryOptions,
+    ) -> Result<MLModelOutput, CoreMLError> {
+        self.predict_with_retry_if(options, |_| true)
+    }
+
+    /// Retry a predict that needs no input re-binding, retrying only when
+    /// `should_retry` accepts the failure.
+    ///
+    /// A failed `predict()` clears the Swift-side input dictionary
+    /// (`clearBindings()` in the `predict()` catch) and the Rust-side
+    /// `iosurface_bound_outputs` set, so this method cannot re-bind
+    /// anything -- `CoreMLModel` does not retain input data, because
+    /// `add_input` moves ownership into Swift's `self.dict`.
+    ///
+    /// That makes this method correct only where the retry does not need
+    /// the inputs back: models with no inputs, and models whose failure
+    /// path leaves the bindings installed. For a model with inputs, use
+    /// [`predict_with_rebind_retry`](Self::predict_with_rebind_retry),
+    /// which re-binds through a caller-supplied closure between attempts.
+    /// Retrying a bound-input model with this method will fail
+    /// identically on every attempt.
+    pub fn predict_with_retry_if(
+        &mut self,
+        options: PredictRetryOptions,
+        should_retry: impl FnMut(&CoreMLError) -> bool,
+    ) -> Result<MLModelOutput, CoreMLError> {
+        retry_with_backoff(options, should_retry, |_| self.predict())
+    }
+
+    /// Re-bind inputs and predict, retrying the whole cycle.
+    ///
+    /// `rebind_and_predict` is called once per attempt and is expected to
+    /// re-install the model's inputs before calling
+    /// [`predict`](Self::predict). Use this for any model that takes
+    /// inputs: the first attempt's failure clears the bindings, so a
+    /// retry that only re-runs `predict()` would run with an empty input
+    /// dictionary and fail the same way every time.
+    ///
+    /// ```no_run
+    /// # use coreml_rs_fork::{CoreMLModelWithState, PredictRetryOptions, CoreMLError};
+    /// # fn demo(mut model: CoreMLModelWithState, tensor: ndarray::ArrayD<f32>) -> Result<(), CoreMLError> {
+    /// let options = PredictRetryOptions::fixed(3, std::time::Duration::from_millis(50));
+    /// let out = model.predict_with_rebind_retry(options, |model| {
+    ///     model.add_input("image", tensor.clone())?;
+    ///     model.predict()
+    /// })?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn predict_with_rebind_retry(
+        &mut self,
+        options: PredictRetryOptions,
+        rebind_and_predict: impl FnMut(&mut Self) -> Result<MLModelOutput, CoreMLError>,
+    ) -> Result<MLModelOutput, CoreMLError> {
+        self.predict_with_rebind_retry_if(options, |_| true, rebind_and_predict)
+    }
+
+    /// [`predict_with_rebind_retry`](Self::predict_with_rebind_retry) with
+    /// a caller-supplied retry predicate.
+    pub fn predict_with_rebind_retry_if(
+        &mut self,
+        options: PredictRetryOptions,
+        should_retry: impl FnMut(&CoreMLError) -> bool,
+        mut rebind_and_predict: impl FnMut(&mut Self) -> Result<MLModelOutput, CoreMLError>,
+    ) -> Result<MLModelOutput, CoreMLError> {
+        retry_with_backoff(options, should_retry, |_| rebind_and_predict(self))
+    }
+
     pub fn description(&self) -> crate::description::ModelDescription {
         self.model.description().into()
     }
@@ -1434,4 +1731,300 @@ fn reinterpret_u16_to_f16(input: ndarray::ArrayD<u16>) -> ndarray::ArrayD<half::
         Vec::from_raw_parts(ptr, len, capacity)
     };
     ndarray::ArrayD::from_shape_vec(ndarray::IxDyn(&shape), raw_vec_f16).unwrap()
+}
+
+#[cfg(test)]
+mod retry_backoff_tests {
+    use super::*;
+
+    #[test]
+    fn none_backoff_is_always_zero() {
+        let backoff = RetryBackoff::None;
+        assert_eq!(backoff.delay(0), Duration::ZERO);
+        assert_eq!(backoff.delay(1000), Duration::ZERO);
+    }
+
+    #[test]
+    fn fixed_backoff_ignores_index() {
+        let backoff = RetryBackoff::Fixed(Duration::from_millis(25));
+        assert_eq!(backoff.delay(0), Duration::from_millis(25));
+        assert_eq!(backoff.delay(7), Duration::from_millis(25));
+    }
+
+    #[test]
+    fn exponential_backoff_grows_then_clamps() {
+        let backoff = RetryBackoff::Exponential {
+            initial: Duration::from_millis(10),
+            multiplier: 2.0,
+            max: Duration::from_millis(100),
+        };
+        assert_eq!(backoff.delay(0), Duration::from_millis(10));
+        assert_eq!(backoff.delay(1), Duration::from_millis(20));
+        assert_eq!(backoff.delay(2), Duration::from_millis(40));
+        // Clamped at max from here on.
+        assert_eq!(backoff.delay(3), Duration::from_millis(80));
+        assert_eq!(backoff.delay(4), Duration::from_millis(100));
+        assert_eq!(backoff.delay(50), Duration::from_millis(100));
+    }
+
+    #[test]
+    fn exponential_backoff_multiplier_below_one_is_treated_as_one() {
+        let backoff = RetryBackoff::Exponential {
+            initial: Duration::from_millis(10),
+            multiplier: 0.25,
+            max: Duration::from_millis(100),
+        };
+        // multiplier.max(1.0) => 1.0, so no decay.
+        assert_eq!(backoff.delay(0), Duration::from_millis(10));
+        assert_eq!(backoff.delay(3), Duration::from_millis(10));
+    }
+
+    /// Regression: `Duration::mul_f64` panics on a non-finite factor.
+    /// `powi` overflows to infinity well before the retry index is
+    /// exhausted, so the delay must saturate at `max` instead.
+    #[test]
+    fn exponential_backoff_saturates_instead_of_panicking() {
+        let backoff = RetryBackoff::Exponential {
+            initial: Duration::from_secs(1),
+            multiplier: 10.0,
+            max: Duration::from_secs(30),
+        };
+        // 10^309 overflows f64 to infinity.
+        assert_eq!(backoff.delay(309), Duration::from_secs(30));
+        assert_eq!(backoff.delay(4096), Duration::from_secs(30));
+        assert_eq!(backoff.delay(usize::MAX), Duration::from_secs(30));
+    }
+
+    /// Regression: the `retry_index as i32` cast wraps for indices above
+    /// 2^31-1. A wrapped (possibly negative) exponent must still saturate
+    /// at `max` rather than producing a nonsense small delay.
+    #[test]
+    fn exponential_backoff_handles_indices_above_i32_max() {
+        let backoff = RetryBackoff::Exponential {
+            initial: Duration::from_secs(1),
+            multiplier: 2.0,
+            max: Duration::from_secs(60),
+        };
+        let above = i32::MAX as usize + 1;
+        assert_eq!(backoff.delay(above), Duration::from_secs(60));
+        assert_eq!(backoff.delay(usize::MAX), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn exponential_backoff_with_zero_max_never_sleeps() {
+        let backoff = RetryBackoff::Exponential {
+            initial: Duration::from_secs(1),
+            multiplier: 2.0,
+            max: Duration::ZERO,
+        };
+        assert_eq!(backoff.delay(0), Duration::ZERO);
+        assert_eq!(backoff.delay(10), Duration::ZERO);
+    }
+
+    // ---- retry_with_backoff: the attempt loop itself --------------------
+    //
+    // No CoreML model is involved here, so these pin the retry semantics
+    // directly: how many times the operation runs, whether the predicate
+    // gates a retry, and which error comes out.
+
+    #[test]
+    fn retry_with_backoff_succeeds_on_first_attempt_without_retrying() {
+        let mut calls = 0;
+        let out = retry_with_backoff(
+            PredictRetryOptions::fixed(5, Duration::ZERO),
+            |_| true,
+            |_| {
+                calls += 1;
+                Ok::<_, CoreMLError>(42u32)
+            },
+        )
+        .unwrap();
+        assert_eq!(out, 42);
+        assert_eq!(calls, 1, "must not retry after a success");
+    }
+
+    #[test]
+    fn retry_with_backoff_retries_until_success_and_reports_attempt_count() {
+        let mut calls = 0;
+        let mut seen_attempts = Vec::new();
+        let out = retry_with_backoff(
+            PredictRetryOptions::fixed(5, Duration::ZERO),
+            |_| true,
+            |attempt| {
+                seen_attempts.push(attempt);
+                calls += 1;
+                if calls < 3 {
+                    Err(CoreMLError::UnknownError("transient".to_string()))
+                } else {
+                    Ok(calls as u32)
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(out, 3);
+        assert_eq!(calls, 3);
+        // The closure is told which attempt it is, so a rebind
+        // implementation can vary per attempt.
+        assert_eq!(seen_attempts, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn retry_with_backoff_stops_after_max_retries_and_propagates_final_error() {
+        let mut calls = 0;
+        let err = retry_with_backoff(
+            PredictRetryOptions::fixed(3, Duration::ZERO),
+            |_| true,
+            |_| {
+                calls += 1;
+                Err::<u32, _>(CoreMLError::UnknownError(format!("fail {calls}")))
+            },
+        )
+        .unwrap_err();
+        // 1 initial attempt + max_retries.
+        assert_eq!(calls, 4);
+        assert_eq!(err.to_string(), "UnknownError: fail 4");
+    }
+
+    #[test]
+    fn retry_with_backoff_predicate_can_short_circuit_retries() {
+        let mut calls = 0;
+        let err = retry_with_backoff(
+            PredictRetryOptions::fixed(10, Duration::ZERO),
+            // Only retry the first failure; a non-retryable error stops immediately.
+            |err| matches!(err, CoreMLError::UnknownError(m) if m == "retryable"),
+            |_| {
+                calls += 1;
+                Err::<u32, _>(CoreMLError::UnknownError("fatal".to_string()))
+            },
+        )
+        .unwrap_err();
+        assert_eq!(calls, 1, "a fatal error must not be retried");
+        assert_eq!(err.to_string(), "UnknownError: fatal");
+    }
+
+    #[test]
+    fn retry_with_backoff_zero_retries_runs_the_operation_once() {
+        let mut calls = 0;
+        let err = retry_with_backoff(
+            PredictRetryOptions::none(),
+            |_| true,
+            |_| {
+                calls += 1;
+                Err::<u32, _>(CoreMLError::ModelNotLoaded)
+            },
+        )
+        .unwrap_err();
+        assert_eq!(calls, 1);
+        assert!(matches!(err, CoreMLError::ModelNotLoaded));
+    }
+
+    /// The re-bind contract: a fresh attempt must re-establish whatever
+    /// the previous failure tore down. The closure here models what
+    /// `predict_with_rebind_retry` asks callers to do -- re-install
+    /// inputs, then predict -- and asserts the retry actually re-ran it
+    /// rather than predicting with stale (or empty) bindings.
+    #[test]
+    fn retry_with_backoff_reruns_the_whole_operation_per_attempt() {
+        let mut bindings = Vec::<&'static str>::new();
+        let mut predictions = 0;
+
+        let out = retry_with_backoff(
+            PredictRetryOptions::fixed(4, Duration::ZERO),
+            |_| true,
+            |_| {
+                // Stand-in for `model.add_input(..)?`.
+                bindings.push("image");
+                predictions += 1;
+                if predictions < 3 {
+                    Err(CoreMLError::UnknownError("transient".to_string()))
+                } else {
+                    Ok(bindings.len())
+                }
+            },
+        )
+        .unwrap();
+
+        assert_eq!(out, 3);
+        assert_eq!(bindings.len(), 3, "each attempt must re-bind");
+        assert_eq!(predictions, 3);
+    }
+
+    #[test]
+    fn retry_with_backoff_applies_backoff_between_attempts_only() {
+        // Zero-duration backoff keeps the test fast; this asserts the
+        // loop structure (max_retries + 1 attempts) rather than wall time.
+        let mut attempts = 0;
+        let _ = retry_with_backoff(
+            PredictRetryOptions::exponential(2, Duration::ZERO, 2.0, Duration::from_secs(1)),
+            |_| true,
+            |_| {
+                attempts += 1;
+                Err::<(), _>(CoreMLError::UnknownError("x".to_string()))
+            },
+        );
+        assert_eq!(attempts, 3);
+    }
+
+    #[test]
+    fn retry_with_backoff_handles_a_recovering_operation_with_exponential_backoff() {
+        let start = std::time::Instant::now();
+        let mut calls = 0;
+        let out = retry_with_backoff(
+            PredictRetryOptions::exponential(
+                3,
+                Duration::from_millis(5),
+                2.0,
+                Duration::from_millis(100),
+            ),
+            |_| true,
+            |_| {
+                calls += 1;
+                if calls < 3 {
+                    Err(CoreMLError::UnknownError("transient".to_string()))
+                } else {
+                    Ok("recovered")
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(out, "recovered");
+        // 5ms + 10ms of sleep, so at least 15ms must have elapsed.
+        assert!(
+            start.elapsed() >= Duration::from_millis(15),
+            "backoff sleeps must actually be applied between attempts"
+        );
+    }
+
+    #[test]
+    fn retry_options_constructors_match_their_backoff() {
+        assert_eq!(PredictRetryOptions::none().max_retries, 0);
+        assert_eq!(PredictRetryOptions::none().backoff, RetryBackoff::None);
+
+        let fixed = PredictRetryOptions::fixed(3, Duration::from_millis(10));
+        assert_eq!(fixed.max_retries, 3);
+        assert_eq!(
+            fixed.backoff,
+            RetryBackoff::Fixed(Duration::from_millis(10))
+        );
+
+        let exp = PredictRetryOptions::exponential(
+            5,
+            Duration::from_millis(1),
+            3.0,
+            Duration::from_secs(2),
+        );
+        assert_eq!(exp.max_retries, 5);
+        assert_eq!(
+            exp.backoff,
+            RetryBackoff::Exponential {
+                initial: Duration::from_millis(1),
+                multiplier: 3.0,
+                max: Duration::from_secs(2),
+            }
+        );
+
+        // Default is the no-retry policy, and `predict()` uses it.
+        assert_eq!(PredictRetryOptions::default(), PredictRetryOptions::none());
+        assert_eq!(RetryBackoff::default(), RetryBackoff::None);
+    }
 }

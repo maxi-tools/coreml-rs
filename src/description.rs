@@ -21,6 +21,22 @@ impl ModelDescription {
     pub fn output_names(&self) -> Vec<String> {
         self.outputs.keys().cloned().collect()
     }
+
+    /// Returns a name -> shape map for every input feature.
+    pub fn input_shapes(&self) -> HashMap<String, Vec<usize>> {
+        self.inputs
+            .iter()
+            .map(|(name, fd)| (name.clone(), fd.shape.clone()))
+            .collect()
+    }
+
+    /// Returns a name -> shape map for every output feature.
+    pub fn output_shapes(&self) -> HashMap<String, Vec<usize>> {
+        self.outputs
+            .iter()
+            .map(|(name, fd)| (name.clone(), fd.shape.clone()))
+            .collect()
+    }
 }
 
 impl From<crate::ffi::ModelDescription> for ModelDescription {
