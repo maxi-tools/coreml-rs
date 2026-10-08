@@ -8,6 +8,12 @@
 name: Review Gate
 
 on:
+  # The merge queue needs a workflow run for required-check accounting, but its
+  # synthetic merge group has no PR review threads or reviewers to evaluate.
+  # The job below is skipped on that event, which reports a successful skipped
+  # check without weakening any pull_request-time gate.
+  merge_group:
+    types: [checks_requested]
   # `labeled`/`unlabeled` are here for ONE reason: `review-infra-unavailable`.
   # That label waives the non-author-review condition, and a label-dependent
   # verdict that is not recomputed when the label moves is the same defect
